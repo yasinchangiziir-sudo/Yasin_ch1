@@ -6,8 +6,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # -------------------- Configuration --------------------
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
+ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8910769488")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 DATABASE = "victims.db"
