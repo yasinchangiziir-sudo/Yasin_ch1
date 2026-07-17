@@ -4,7 +4,7 @@ from flask import Flask, request, render_template_string, send_from_directory, j
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, MessageReactionHandler
-from gtts import gTTS
+import edge_tts
 
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
@@ -98,7 +98,7 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI --------------------
+# -------------------- Groq AI (Strong Models) --------------------
 def ask_groq(prompt):
     if not GROQ_API_KEY:
         return "⚠️ کلید Groq تنظیم نشده است."
@@ -106,11 +106,12 @@ def ask_groq(prompt):
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         models = [
-            "llama-3.3-70b-versatile",
-            "deepseek-r1-distill-llama-70b",
-            "llama-3.1-8b-instant"
+            "llama-3.3-70b-versatile",       # قوی‌ترین مدل رایگان Llama
+            "deepseek-r1-distill-llama-70b", # مدل استدلالی DeepSeek
+            "llama-3.1-8b-instant",          # ضعیف‌تر ولی سریع
         ]
         system_prompt = "تو یک دستیار هوشمند، دقیق و دوستانه هستی. پاسخ‌های کامل، مفید و به زبان فارسی روان بده. اگر سوال برنامه‌نویسی یا فنی است، کد کامل و توضیح دقیق ارائه کن. همیشه مودب و حرفه‌ای باش."
+        last_error = None
         for model in models:
             payload = {
                 "model": model,
@@ -125,7 +126,11 @@ def ask_groq(prompt):
             if resp.status_code == 200:
                 data = resp.json()
                 return data['choices'][0]['message']['content'].strip()
-        return "❌ هوش مصنوعی در دسترس نیست."
+            else:
+                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
+                app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
+        app.logger.error(f"Groq all models failed: {last_error}")
+        return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
@@ -152,13 +157,15 @@ def transcribe_audio(file_bytes):
         app.logger.error(f"Transcription error: {e}")
         return None
 
-def text_to_speech(text, lang='fa'):
+async def text_to_speech_async(text, voice="fa-IR-FaridNeural"):
     try:
-        tts = gTTS(text=text, lang=lang)
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_fp.seek(0)
-        return mp3_fp.getvalue()
+        communicate = edge_tts.Communicate(text=text, voice=voice)
+        mp3_data = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                mp3_data.write(chunk["data"])
+        mp3_data.seek(0)
+        return mp3_data.getvalue()
     except Exception as e:
         app.logger.error(f"TTS error: {e}")
         return None
@@ -909,7 +916,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     thinking = await msg.reply_text("🤔 ...")
     answer = ask_groq(transcript)
-    audio_data = text_to_speech(answer, lang='fa')
+    audio_data = await text_to_speech_async(answer)
     if audio_data:
         await msg.reply_voice(voice=io.BytesIO(audio_data))
         await thinking.delete()
