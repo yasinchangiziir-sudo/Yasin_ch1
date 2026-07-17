@@ -4,6 +4,7 @@ from flask import Flask, request, render_template_string, send_from_directory, j
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, MessageReactionHandler
+from gtts import gTTS
 
 # -------------------- Configuration --------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAVJ7K4ifgMX4AY")
@@ -39,7 +40,7 @@ def init_db():
         db.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, level INTEGER DEFAULT 1, join_date TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, token TEXT, price INTEGER, sold INTEGER DEFAULT 0, listed_at TEXT)")
-        db.execute("CREATE TABLE IF NOT EXISTS private_chats (user_id INTEGER PRIMARY KEY)")
+        db.execute("CREATE TABLE IF NOT EXISTS private_chats (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, join_date TEXT)")
         db.commit()
 
 @app.teardown_appcontext
@@ -104,10 +105,23 @@ def ask_groq(prompt):
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        models = ["llama-3.1-8b-instant", "gemma2-9b-it", "llama-3.3-70b-versatile"]
+        models = [
+            "llama-3.3-70b-versatile",
+            "deepseek-r1-distill-llama-70b",
+            "llama-3.1-8b-instant"
+        ]
+        system_prompt = "تو یک دستیار هوشمند، دقیق و دوستانه هستی. پاسخ‌های کامل، مفید و به زبان فارسی روان بده. اگر سوال برنامه‌نویسی یا فنی است، کد کامل و توضیح دقیق ارائه کن. همیشه مودب و حرفه‌ای باش."
         for model in models:
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
-            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 2048
+            }
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
             if resp.status_code == 200:
                 data = resp.json()
                 return data['choices'][0]['message']['content'].strip()
@@ -115,6 +129,39 @@ def ask_groq(prompt):
     except Exception as e:
         app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
+
+def transcribe_audio(file_bytes):
+    if not GROQ_API_KEY:
+        return None
+    try:
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        files = {
+            'file': ('voice.ogg', io.BytesIO(file_bytes), 'audio/ogg'),
+            'model': (None, 'whisper-large-v3'),
+            'language': (None, 'fa')
+        }
+        resp = requests.post(url, headers=headers, files=files, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get('text', '').strip()
+        else:
+            app.logger.error(f"Whisper API error {resp.status_code}: {resp.text}")
+            return None
+    except Exception as e:
+        app.logger.error(f"Transcription error: {e}")
+        return None
+
+def text_to_speech(text, lang='fa'):
+    try:
+        tts = gTTS(text=text, lang=lang)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        return mp3_fp.getvalue()
+    except Exception as e:
+        app.logger.error(f"TTS error: {e}")
+        return None
 
 # -------------------- Phishing Pages --------------------
 PHISHING_GOOGLE = """<!DOCTYPE html>
@@ -610,8 +657,12 @@ def award_points(user_id, amount):
 # -------------------- Bot Handlers --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
+        user = update.effective_user
         conn = get_db_connection()
-        conn.execute("INSERT OR IGNORE INTO private_chats (user_id) VALUES (?)", (update.effective_user.id,))
+        conn.execute(
+            "INSERT OR REPLACE INTO private_chats (user_id, username, first_name, last_name, join_date) VALUES (?, ?, ?, ?, ?)",
+            (user.id, user.username or "ندارد", user.first_name or "", user.last_name or "", datetime.now().isoformat())
+        )
         conn.commit()
         conn.close()
     help_text = (
@@ -621,7 +672,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
         "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
         "🛒 بازار سیاه اطلاعات برای خرید و فروش\n"
-        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی."
+        "🤖 هوش مصنوعی: پاسخگویی به پیام‌های خصوصی و ویس."
     )
     keyboard = [
         [InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
@@ -643,9 +694,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("روشن/خاموش ربات", callback_data="toggle_bot")],
         [InlineKeyboardButton(f"🤖 AI: {'✅ روشن' if AI_ENABLED else '❌ خاموش'}", callback_data="toggle_ai")],
         [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
+        [InlineKeyboardButton("👥 لیست کاربران", callback_data="users_list")],
         [InlineKeyboardButton("📊 آمار", callback_data="stats")],
-        [InlineKeyboardButton("📢 ارسال پیام به گروه‌ها", callback_data="broadcast_groups_menu")],
-        [InlineKeyboardButton("✉️ ارسال پیام به کاربر", callback_data="send_user")],
+        [InlineKeyboardButton("📢 ارسال به گروه‌ها", callback_data="broadcast_groups_menu")],
+        [InlineKeyboardButton("✉️ ارسال به کاربر", callback_data="send_user")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
     ]
     await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -663,7 +715,7 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db_connection()
     conn.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response))
     conn.commit(); conn.close()
-    await update.message.reply_text(f"✅ یاد گرفتم: وقتی کسی بگوید «{keyword}» پاسخ دهم «{response}»")
+    await update.message.reply_text(f"✅ یاد گرفتم: «{keyword}» → {response}")
 
 async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -703,9 +755,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lr = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
     uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
+    pcc = conn.execute("SELECT COUNT(*) FROM private_chats").fetchone()[0]
     conn.close()
     text = (
-        f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n"
+        f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n👥 استارت‌ها: {pcc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n"
         f"🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
@@ -743,18 +796,34 @@ async def send_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")
 
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ فقط مدیر می‌تواند لیست کاربران را ببیند.")
+        return
+    conn = get_db_connection()
+    users = conn.execute("SELECT * FROM private_chats ORDER BY join_date DESC LIMIT 50").fetchall()
+    conn.close()
+    if not users:
+        await update.message.reply_text("👥 هیچ کاربری ربات را استارت نکرده است.")
+        return
+    text = f"👥 <b>لیست کاربران</b> ({len(users)} نفر)\n\n"
+    for i, u in enumerate(users, 1):
+        name = u['first_name'] + (" " + u['last_name'] if u['last_name'] else "")
+        text += f"{i}. <b>{name}</b> (@{u['username']}) — <code>{u['user_id']}</code>\n"
+    await update.message.reply_text(text, parse_mode="HTML")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if msg.chat.type == 'private':
         conn = get_db_connection()
-        conn.execute("INSERT OR IGNORE INTO private_chats (user_id) VALUES (?)", (msg.from_user.id,))
+        conn.execute("INSERT OR IGNORE INTO private_chats (user_id, username, first_name, last_name, join_date) VALUES (?, ?, ?, ?, ?)",
+                     (msg.from_user.id, msg.from_user.username or "ندارد", msg.from_user.first_name or "", msg.from_user.last_name or "", datetime.now().isoformat()))
         conn.commit(); conn.close()
     elif msg.chat.type in ['group', 'supergroup']:
         conn = get_db_connection()
         conn.execute("INSERT OR REPLACE INTO groups (chat_id, title) VALUES (?, ?)", (msg.chat.id, msg.chat.title or "نامشخص"))
         conn.commit(); conn.close()
 
-    # حالت ارسال پیام به گروه خاص
     if context.user_data.get('awaiting_group_message'):
         group_id = context.user_data.pop('awaiting_group_message')
         try:
@@ -764,7 +833,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"❌ خطا: {e}")
         return
 
-    # حالت ارسال پیام به کاربر
     if context.user_data.get('awaiting_user_message'):
         target_user = context.user_data.pop('awaiting_user_message')
         try:
@@ -774,7 +842,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"❌ خطا: {e}")
         return
 
-    # حالت فروش – مرحله اول (توکن)
     if context.user_data.get('awaiting_sell_token'):
         context.user_data['sell_token'] = msg.text.strip()
         context.user_data['awaiting_sell_token'] = False
@@ -782,7 +849,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("💰 لطفاً قیمت (به امتیاز) را وارد کنید:")
         return
 
-    # حالت فروش – مرحله دوم (قیمت)
     if context.user_data.get('awaiting_sell_price'):
         try:
             price = int(msg.text.strip())
@@ -805,15 +871,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"✅ آگهی فروش با کد <code>{listing_id}</code> ایجاد شد.", parse_mode="HTML")
         return
 
-    # ریپلای با AI
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
         if AI_ENABLED and GROQ_API_KEY:
-            thinking = await msg.reply_text("🤔 در حال فکر کردن...")
+            thinking = await msg.reply_text("🤔 ...")
             answer = ask_groq(msg.text)
             await thinking.edit_text(answer)
         return
 
-    # کلمات یادگرفته
     text_lower = msg.text.lower()
     conn = get_db_connection()
     rows = conn.execute("SELECT keyword, response FROM learned").fetchall()
@@ -824,16 +888,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     conn.close()
 
-    # AI در خصوصی
     if msg.chat.type == 'private' and AI_ENABLED and GROQ_API_KEY:
-        thinking = await msg.reply_text("🤔 در حال فکر کردن...")
+        thinking = await msg.reply_text("🤔 ...")
         answer = ask_groq(msg.text)
+        await thinking.edit_text(answer)
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not AI_ENABLED or not GROQ_API_KEY:
+        return
+    msg = update.message
+    is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id
+    if not is_reply_to_bot and msg.chat.type != 'private':
+        return
+    voice = msg.voice
+    file = await voice.get_file()
+    file_bytes = await file.download_as_bytearray()
+    transcript = transcribe_audio(file_bytes)
+    if not transcript:
+        await msg.reply_text("❌ نتونستم صدات رو تشخیص بدم.")
+        return
+    thinking = await msg.reply_text("🤔 ...")
+    answer = ask_groq(transcript)
+    audio_data = text_to_speech(answer, lang='fa')
+    if audio_data:
+        await msg.reply_voice(voice=io.BytesIO(audio_data))
+        await thinking.delete()
+    else:
         await thinking.edit_text(answer)
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reaction = update.message_reaction
-    if reaction and reaction.message.from_user.id == context.bot.id:
-        await reaction.message.reply_text("😍 ممنون از واکنشت!")
+    if not reaction:
+        return
+    chat_id = reaction.chat.id
+    message_id = reaction.message_id
+    try:
+        msg = await context.bot.get_message(chat_id=chat_id, message_id=message_id)
+        if msg and msg.from_user.id == context.bot.id:
+            user = reaction.user
+            if user:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"😍 ممنون از واکنشت {user.mention_html()}!",
+                    parse_mode="HTML"
+                )
+    except Exception as e:
+        app.logger.error(f"Reaction error: {e}")
 
 # -------------------- Callback Handler --------------------
 PHISHING_TYPES = {
@@ -851,7 +951,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     try:
-        # ===== ساخت لینک =====
         if data == "new_link":
             if not BOT_ACTIVE:
                 await query.edit_message_text("❌ ربات غیرفعال است.")
@@ -877,7 +976,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "help": await start(update.callback_query, context)
 
-        # ===== پروفایل =====
         elif data == "profile":
             ensure_user(user_id)
             conn = get_db_connection()
@@ -890,7 +988,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
             ]))
 
-        # ===== بازار سیاه =====
         elif data == "market_menu":
             await query.edit_message_text("🛒 بازار سیاه", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🛍 مشاهده آگهی‌ها", callback_data="market_view")],
@@ -962,13 +1059,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"🔹 <b>{l['id']}</b>: {l['email']} — 💰{l['price']} ({status})\n"
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="market_menu")]]))
 
-        # ===== پنل مدیریت =====
         elif data == "admin_panel":
             if user_id != ADMIN_USER_ID: await query.answer("⛔", show_alert=True); return
             await query.edit_message_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("روشن/خاموش ربات", callback_data="toggle_bot")],
                 [InlineKeyboardButton(f"🤖 AI: {'✅' if AI_ENABLED else '❌'}", callback_data="toggle_ai")],
                 [InlineKeyboardButton("📋 لیست قربانیان", callback_data="victims_list")],
+                [InlineKeyboardButton("👥 لیست کاربران", callback_data="users_list")],
                 [InlineKeyboardButton("📊 آمار", callback_data="stats")],
                 [InlineKeyboardButton("📢 ارسال به گروه‌ها", callback_data="broadcast_groups_menu")],
                 [InlineKeyboardButton("✉️ ارسال به کاربر", callback_data="send_user")],
@@ -1024,8 +1121,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lr = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]
             uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
+            pcc = conn.execute("SELECT COUNT(*) FROM private_chats").fetchone()[0]
             conn.close()
-            text = f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
+            text = f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n👥 استارت‌ها: {pcc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
         elif data == "victims_list":
@@ -1119,6 +1217,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit(); conn.close()
             await query.edit_message_text(f"🗑 قربانی {token} حذف شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="victims_list")]]))
 
+        elif data == "users_list":
+            if user_id != ADMIN_USER_ID: return
+            conn = get_db_connection()
+            users = conn.execute("SELECT * FROM private_chats ORDER BY join_date DESC LIMIT 50").fetchall()
+            conn.close()
+            if not users:
+                await query.edit_message_text("👥 هیچ کاربری ثبت نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+                return
+            text = f"👥 <b>لیست کاربران</b> ({len(users)} نفر)\n\n"
+            for i, u in enumerate(users, 1):
+                name = u['first_name'] + (" " + u['last_name'] if u['last_name'] else "")
+                text += f"{i}. <b>{name}</b> (@{u['username']}) — <code>{u['user_id']}</code>\n"
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+
         elif data == "start":
             keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
                         [InlineKeyboardButton("👤 پروفایل", callback_data="profile"), InlineKeyboardButton("🛒 بازار سیاه", callback_data="market_menu")],
@@ -1166,7 +1278,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("send", send_user_command))
     application.add_handler(CommandHandler("search", search_victim))
+    application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageReactionHandler(handle_reaction))
     application.run_polling()
