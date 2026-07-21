@@ -794,7 +794,7 @@ def award_points(user_id, amount):
     conn.close()
 
 # -------------------- Handlers --------------------
-REACTIONS = ["👍", "❤️", "🔥", "👏", "😍", "⚡", "💯", "🤩"]
+REACTIONS = ["👍", "❤️", "🔥", "👏", "😂", "🫩", "😡", "😨"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
