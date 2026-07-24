@@ -20,6 +20,9 @@ REACTIONS_ENABLED = True
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# -------------------- Conversation memory --------------------
+conversation_history = {}  # {user_id: [{"role": "user"/"assistant", "content": "..."}]}
+
 # -------------------- Database --------------------
 def get_db():
     conn = sqlite3.connect(DATABASE)
@@ -68,20 +71,32 @@ def get_main_menu_keyboard(is_creator=False, is_admin=False):
     return InlineKeyboardMarkup(keyboard)
 
 # -------------------- AI Helpers --------------------
-def ask_groq(prompt):
+def ask_groq(prompt, user_id=None):
     if not GROQ_API_KEY: return "⚠️ AI کلید تنظیم نشده است."
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        system_prompt = ("تو یک دستیار باهوش، خوش‌برخورد و خودمانی هستی. همیشه پاسخ‌های مفید، روان و به فارسی بده. "
+                         "اگر کاربر اسمش رو گفت، تو هم از اسمش استفاده کن. "
+                         "مکالمات قبلی رو به یاد داشته باش و پاسخ‌های مرتبط بده.")
+        messages = [{"role": "system", "content": system_prompt}]
+        if user_id and user_id in conversation_history:
+            messages.extend(conversation_history[user_id][-20:])
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "temperature": 0.9,
             "max_tokens": 1000
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=20)
         if resp.status_code == 200:
-            return resp.json()['choices'][0]['message']['content'].strip()
+            answer = resp.json()['choices'][0]['message']['content'].strip()
+            if user_id is not None:
+                if user_id not in conversation_history: conversation_history[user_id] = []
+                conversation_history[user_id].append({"role": "user", "content": prompt})
+                conversation_history[user_id].append({"role": "assistant", "content": answer})
+            return answer
         return "❌ هوش مصنوعی در دسترس نیست."
     except:
         return "❌ خطا در ارتباط با AI."
@@ -123,8 +138,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = False
     if update.effective_chat.type != 'private':
         is_admin = await is_user_admin(chat_id, user_id, context)
+    # Personal greeting
+    name = update.effective_user.full_name
     await update.message.reply_text(
-        "👋 سلام! من ربات هوشمند شما هستم. از دکمه‌های زیر استفاده کنید:",
+        f"👋 سلام {name}! من ربات هوشمند تو هستم. از دکمه‌های زیر استفاده کن:",
         reply_markup=get_main_menu_keyboard(is_creator, is_admin)
     )
 
@@ -137,18 +154,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     chat_id = query.message.chat.id if query.message else None
 
-    # Helper to refresh menu after action
     async def refresh_menu():
         is_creator = await is_user_creator(user_id)
         is_admin = False
         if chat_id and query.message.chat.type != 'private':
             is_admin = await is_user_admin(chat_id, user_id, context)
-        await query.edit_message_text("👋 سلام! من ربات هوشمند شما هستم. از دکمه‌های زیر استفاده کنید:",
-                                      reply_markup=get_main_menu_keyboard(is_creator, is_admin))
+        await query.edit_message_text("👋 از دکمه‌های زیر استفاده کن:", reply_markup=get_main_menu_keyboard(is_creator, is_admin))
 
-    # ==================== Creator Panel ====================
     if data == "creator_panel":
-        if not await is_user_creator(user_id): return await query.answer("⛔ فقط سازنده", show_alert=True)
+        if not await is_user_creator(user_id): return await query.answer("⛔", show_alert=True)
         keyboard = [
             [InlineKeyboardButton(f"ربات {'✅' if BOT_ACTIVE else '❌'}", callback_data="toggle_bot"),
              InlineKeyboardButton(f"AI {'✅' if AI_ENABLED else '❌'}", callback_data="toggle_ai")],
@@ -158,107 +172,67 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
         ]
         await query.edit_message_text("🔧 پنل سازنده:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data == "toggle_bot":
-        BOT_ACTIVE = not BOT_ACTIVE
-        await button_handler(update, context)  # re-show panel
-    elif data == "toggle_ai":
-        AI_ENABLED = not AI_ENABLED
-        await button_handler(update, context)
-    elif data == "toggle_reactions":
-        REACTIONS_ENABLED = not REACTIONS_ENABLED
-        await button_handler(update, context)
-    elif data == "broadcast_prompt":
-        context.user_data['awaiting_broadcast'] = True
-        await query.edit_message_text("📢 متن پیام همگانی را ارسال کنید:")
+    elif data == "toggle_bot": BOT_ACTIVE = not BOT_ACTIVE; await button_handler(update, context)
+    elif data == "toggle_ai": AI_ENABLED = not AI_ENABLED; await button_handler(update, context)
+    elif data == "toggle_reactions": REACTIONS_ENABLED = not REACTIONS_ENABLED; await button_handler(update, context)
+    elif data == "broadcast_prompt": context.user_data['awaiting_broadcast'] = True; await query.edit_message_text("📢 متن پیام همگانی:")
     elif data == "show_stats":
         conn = get_db(); groups_cnt = conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
         learned_cnt = conn.execute("SELECT COUNT(*) FROM learned").fetchone()[0]; conn.close()
-        await query.edit_message_text(f"📊 آمار:\n👥 گروه‌ها: {groups_cnt}\n🧠 کلمات: {learned_cnt}",
-                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="creator_panel")]]))
-
-    # ==================== Admin Panel ====================
+        await query.edit_message_text(f"📊 گروه‌ها: {groups_cnt}\n🧠 کلمات: {learned_cnt}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="creator_panel")]]))
     elif data == "admin_panel":
-        if chat_id and not await is_user_admin(chat_id, user_id, context):
-            return await query.answer("⛔ فقط ادمین گروه", show_alert=True)
+        if chat_id and not await is_user_admin(chat_id, user_id, context): return await query.answer("⛔", show_alert=True)
         keyboard = [
-            [InlineKeyboardButton("🚫 بن", callback_data="admin_ban"),
-             InlineKeyboardButton("🔇 میوت", callback_data="admin_mute")],
-            [InlineKeyboardButton("🔊 آنمیوت", callback_data="admin_unmute"),
-             InlineKeyboardButton("👢 کیک", callback_data="admin_kick")],
-            [InlineKeyboardButton("📜 قوانین", callback_data="admin_rules_prompt"),
-             InlineKeyboardButton("👋 خوش‌آمدگویی", callback_data="admin_welcome_prompt")],
+            [InlineKeyboardButton("🚫 بن", callback_data="admin_ban"), InlineKeyboardButton("🔇 میوت", callback_data="admin_mute")],
+            [InlineKeyboardButton("🔊 آنمیوت", callback_data="admin_unmute"), InlineKeyboardButton("👢 کیک", callback_data="admin_kick")],
+            [InlineKeyboardButton("📜 قوانین", callback_data="admin_rules_prompt"), InlineKeyboardButton("👋 خوش‌آمد", callback_data="admin_welcome_prompt")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
         ]
         await query.edit_message_text("🛡️ مدیریت گروه:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data.startswith("admin_"):
+    elif data.startswith("admin_") and data not in ("admin_rules_prompt", "admin_welcome_prompt"):
         action = data.replace("admin_", "")
-        if action == "ban" or action == "mute" or action == "unmute" or action == "kick":
-            context.user_data['admin_action'] = action
-            await query.edit_message_text("👤 لطفاً روی پیام کاربر مورد نظر ریپلای کنید و /execute را بفرستید.")
-        elif action == "rules_prompt":
-            context.user_data['awaiting_rules'] = True
-            await query.edit_message_text("📜 متن قوانین جدید را ارسال کنید:")
-        elif action == "welcome_prompt":
-            context.user_data['awaiting_welcome'] = True
-            await query.edit_message_text("👋 متن پیام خوش‌آمدگویی را ارسال کنید:")
-
-    # ==================== Learn Menu ====================
+        context.user_data['admin_action'] = action
+        await query.edit_message_text("👤 روی پیام کاربر ریپلای کنید و /execute را بفرستید.")
+    elif data == "admin_rules_prompt": context.user_data['awaiting_rules'] = True; await query.edit_message_text("📜 متن قوانین جدید:")
+    elif data == "admin_welcome_prompt": context.user_data['awaiting_welcome'] = True; await query.edit_message_text("👋 متن خوش‌آمدگویی:")
     elif data == "learn_menu":
         keyboard = [
-            [InlineKeyboardButton("➕ افزودن", callback_data="learn_add"),
-             InlineKeyboardButton("➖ حذف", callback_data="learn_remove")],
+            [InlineKeyboardButton("➕ افزودن", callback_data="learn_add"), InlineKeyboardButton("➖ حذف", callback_data="learn_remove")],
             [InlineKeyboardButton("📚 لیست", callback_data="learn_list")],
             [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
         ]
-        await query.edit_message_text("🧠 مدیریت یادگیری:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data == "learn_add":
-        context.user_data['awaiting_learn'] = True
-        await query.edit_message_text("📝 کلمه و پاسخ را با فرمت <code>کلمه|پاسخ</code> ارسال کنید:", parse_mode="HTML")
-    elif data == "learn_remove":
-        context.user_data['awaiting_unlearn'] = True
-        await query.edit_message_text("🗑 کلمه‌ای که می‌خواهید حذف شود را ارسال کنید:")
+        await query.edit_message_text("🧠 یادگیری:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data == "learn_add": context.user_data['awaiting_learn'] = True; await query.edit_message_text("📝 کلمه|پاسخ:")
+    elif data == "learn_remove": context.user_data['awaiting_unlearn'] = True; await query.edit_message_text("🗑 کلمه:")
     elif data == "learn_list":
         conn = get_db(); rows = conn.execute("SELECT keyword, response FROM learned ORDER BY keyword").fetchall(); conn.close()
-        if not rows:
-            await query.edit_message_text("📭 لیست خالی است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="learn_menu")]]))
+        if not rows: await query.edit_message_text("📭 خالی.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="learn_menu")]]))
         else:
-            text = "📚 کلمات یادگرفته:\n\n" + "\n".join(f"• <b>{r['keyword']}</b> → {r['response']}" for r in rows)
+            text = "📚 کلمات:\n\n" + "\n".join(f"• <b>{r['keyword']}</b> → {r['response']}" for r in rows)
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="learn_menu")]]))
-
-    # ==================== Fun Menu ====================
     elif data == "fun_menu":
         keyboard = [
-            [InlineKeyboardButton("😂 جوک", callback_data="fun_joke"),
-             InlineKeyboardButton("📚 دانستنی", callback_data="fun_fact")],
-            [InlineKeyboardButton("🎲 تاس", callback_data="fun_dice"),
-             InlineKeyboardButton("🔮 8ball", callback_data="fun_8ball")],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
+            [InlineKeyboardButton("😂 جوک", callback_data="fun_joke"), InlineKeyboardButton("📚 دانستنی", callback_data="fun_fact")],
+            [InlineKeyboardButton("🎲 تاس", callback_data="fun_dice"), InlineKeyboardButton("🔮 8ball", callback_data="fun_8ball")],
+            [InlineKeyboardButton("🔙", callback_data="main_menu")]
         ]
         await query.edit_message_text("🎲 سرگرمی:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data == "fun_joke":
         jokes = ["چرا برنامه‌نویس‌ها تاریکی رو دوست دارن؟ چون light mode چشمشون رو اذیت می‌کنه! 😂", "به سگی گفتم بشین، نشست. فهمیدم تلگرام نیست که ignore کنه.", "زندگی بدون وای‌فای یعنی جهنم. جدی میگم."]
-        await query.edit_message_text(random.choice(jokes), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 یکی دیگه", callback_data="fun_joke"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
+        await query.edit_message_text(random.choice(jokes), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="fun_joke"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
     elif data == "fun_fact":
         facts = ["آیا می‌دانستید قلب میگو در سرش قرار دارد؟", "هر ثانیه ۱۰۰ صاعقه در جهان رخ می‌دهد.", "زبان گربه‌ها اثر ضدعفونی‌کننده دارد."]
-        await query.edit_message_text(f"📚 {random.choice(facts)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 یکی دیگه", callback_data="fun_fact"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
+        await query.edit_message_text(f"📚 {random.choice(facts)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="fun_fact"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
     elif data == "fun_dice":
-        await query.edit_message_text(f"🎲 عدد: {random.randint(1,6)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 دوباره", callback_data="fun_dice"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
+        await query.edit_message_text(f"🎲 عدد: {random.randint(1,6)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="fun_dice"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
     elif data == "fun_8ball":
         answers = ["قطعاً", "شک نکن", "آره", "نه", "پرسش مبهم است", "بعداً بپرس", "خواب دیدی"]
-        await query.edit_message_text(f"🔮 {random.choice(answers)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 دوباره", callback_data="fun_8ball"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
-
+        await query.edit_message_text(f"🔮 {random.choice(answers)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="fun_8ball"), InlineKeyboardButton("🔙", callback_data="fun_menu")]]))
     elif data == "help":
-        help_text = ("🤖 <b>راهنمای ربات:</b>\n"
-                     "/start - نمایش منو\n"
-                     "/learn &lt;کلمه&gt; &lt;پاسخ&gt; - آموزش کلمه\n"
-                     "/unlearn &lt;کلمه&gt; - حذف کلمه\n"
-                     "/wordlist - لیست کلمات\n"
-                     "دکمه‌های شیشه‌ای هم برای مدیریت گروه، یادگیری و سرگرمی در دسترس هستند.")
+        help_text = ("🤖 <b>راهنما:</b>\n/start - منو\n/learn &lt;کلمه&gt; &lt;پاسخ&gt;\n/unlearn &lt;کلمه&gt;\n/wordlist\n"
+                     "دکمه‌ها: پنل سازنده، مدیریت گروه، یادگیری، سرگرمی")
         await query.edit_message_text(help_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-
-    elif data == "main_menu":
-        await refresh_menu()
+    elif data == "main_menu": await refresh_menu()
 
 # -------------------- Message Handler --------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,19 +249,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for g in groups:
             try: await context.bot.send_message(g['chat_id'], text)
             except: pass
-        await msg.reply_text("✅ پیام همگانی ارسال شد.")
+        await msg.reply_text("✅ ارسال شد.")
         return
 
     # Group settings prompts
     if context.user_data.get('awaiting_welcome') and await is_user_admin(chat_id, user_id, context):
         conn = get_db(); conn.execute("INSERT OR REPLACE INTO groups (chat_id, welcome_text) VALUES (?, ?)", (chat_id, text)); conn.commit(); conn.close()
         context.user_data['awaiting_welcome'] = False
-        await msg.reply_text("✅ متن خوش‌آمدگویی تنظیم شد.")
+        await msg.reply_text("✅ تنظیم شد.")
         return
     if context.user_data.get('awaiting_rules') and await is_user_admin(chat_id, user_id, context):
         conn = get_db(); conn.execute("INSERT OR REPLACE INTO groups (chat_id, rules_text) VALUES (?, ?)", (chat_id, text)); conn.commit(); conn.close()
         context.user_data['awaiting_rules'] = False
-        await msg.reply_text("✅ قوانین تنظیم شد.")
+        await msg.reply_text("✅ تنظیم شد.")
         return
     if context.user_data.get('admin_action') and await is_user_admin(chat_id, user_id, context):
         action = context.user_data.pop('admin_action')
@@ -300,14 +274,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif action == 'kick':
                     await context.bot.ban_chat_member(chat_id, target.id)
                     await context.bot.unban_chat_member(chat_id, target.id)
-                await msg.reply_text(f"✅ عملیات {action} با موفقیت انجام شد.")
-            except Exception as e:
-                await msg.reply_text(f"❌ خطا: {e}")
-        else:
-            await msg.reply_text("❌ لطفاً روی پیام کاربر ریپلای کنید.")
+                await msg.reply_text(f"✅ {action} شد.")
+            except Exception as e: await msg.reply_text(f"❌ {e}")
+        else: await msg.reply_text("❌ ریپلای کنید.")
         return
 
-    # Learn/Unlearn via text
+    # Learn/Unlearn
     if context.user_data.get('awaiting_learn'):
         parts = text.split('|')
         if len(parts) == 2:
@@ -315,14 +287,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = get_db(); conn.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response)); conn.commit(); conn.close()
             context.user_data['awaiting_learn'] = False
             await msg.reply_text(f"✅ یاد گرفتم: «{keyword}» → {response}")
-        else:
-            await msg.reply_text("❌ فرمت اشتباه. مثال: سلام|علیک")
+        else: await msg.reply_text("❌ فرمت: کلمه|پاسخ")
         return
     if context.user_data.get('awaiting_unlearn'):
         keyword = text.strip().lower()
         conn = get_db(); conn.execute("DELETE FROM learned WHERE keyword=?", (keyword,)); conn.commit(); conn.close()
         context.user_data['awaiting_unlearn'] = False
-        await msg.reply_text(f"✅ کلمه «{keyword}» حذف شد.")
+        await msg.reply_text(f"✅ حذف شد.")
         return
 
     # Auto reactions
@@ -340,7 +311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
         if AI_ENABLED:
             thinking = await msg.reply_text("🤔 ...")
-            answer = ask_groq(text)
+            answer = ask_groq(text, user_id)
             await thinking.edit_text(answer)
         return
 
@@ -353,42 +324,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg.chat.type == 'private' and AI_ENABLED:
         thinking = await msg.reply_text("🤔 ...")
-        answer = ask_groq(text)
+        answer = ask_groq(text, user_id)
         await thinking.edit_text(answer)
 
 # -------------------- Voice Handler --------------------
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not AI_ENABLED: return
     msg = update.message
-    voice = msg.voice
-    file = await voice.get_file()
-    file_bytes = await file.download_as_bytearray()
+    user_id = msg.from_user.id
+    voice = msg.voice; file = await voice.get_file(); file_bytes = await file.download_as_bytearray()
     transcript = transcribe_audio(file_bytes)
-    if not transcript:
-        await msg.reply_text("❌ تشخیص گفتار ناموفق.")
-        return
+    if not transcript: await msg.reply_text("❌ تشخیص گفتار ناموفق."); return
     thinking = await msg.reply_text("🤔 ...")
-    answer = ask_groq(transcript)
+    answer = ask_groq(transcript, user_id)
     audio = await text_to_speech_async(answer)
     if audio:
-        await msg.reply_voice(voice=io.BytesIO(audio))
-        await thinking.delete()
+        await msg.reply_voice(voice=io.BytesIO(audio)); await thinking.delete()
     else:
         await thinking.edit_text(answer)
+
+# -------------------- Command Handlers (for direct / commands) --------------------
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_creator(update.effective_user.id): await update.message.reply_text("⛔"); return
+    args = context.args
+    if len(args) < 2: await update.message.reply_text("📝 /learn <کلمه> <پاسخ>"); return
+    keyword = args[0].strip().lower(); response = ' '.join(args[1:])
+    conn = get_db(); conn.execute("INSERT OR REPLACE INTO learned (keyword, response) VALUES (?, ?)", (keyword, response)); conn.commit(); conn.close()
+    await update.message.reply_text(f"✅ «{keyword}» → {response}")
+
+async def unlearn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_user_creator(update.effective_user.id): await update.message.reply_text("⛔"); return
+    if not context.args: await update.message.reply_text("📝 /unlearn <کلمه>"); return
+    keyword = context.args[0].strip().lower()
+    conn = get_db(); conn.execute("DELETE FROM learned WHERE keyword=?", (keyword,)); conn.commit(); conn.close()
+    await update.message.reply_text("✅ حذف شد.")
+
+async def wordlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = get_db(); rows = conn.execute("SELECT keyword, response FROM learned ORDER BY keyword").fetchall(); conn.close()
+    if not rows: await update.message.reply_text("📭 خالی."); return
+    text = "📚 کلمات:\n\n" + "\n".join(f"• <b>{r['keyword']}</b> → {r['response']}" for r in rows)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 # -------------------- Main --------------------
 async def main():
     init_db()
     application = Application.builder().token(TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
     application.add_handler(CommandHandler("start", start))
-    # Optional direct commands for convenience
     application.add_handler(CommandHandler("learn", learn_command))
     application.add_handler(CommandHandler("unlearn", unlearn_command))
     application.add_handler(CommandHandler("wordlist", wordlist_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    # Sticker and animation handlers will be caught by handle_message
     await application.run_polling()
 
 def run_flask():
