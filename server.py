@@ -11,7 +11,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8910769488:AAG7effUIZqoK0vVLJ_zRAV
 ADMIN_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@Oython")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "8391932958"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 DATABASE = "victims.db"
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 
