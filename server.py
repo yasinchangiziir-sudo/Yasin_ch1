@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # شناسه عددی ادمین (جایگزین کنید)
 ADMIN_ID = 8910769488  # شناسه تلگرام شما
-BOT_TOKEN = os.environ.get("8313395074:AAGQyJha6f80c_dE_wTtVQ-CUi_qVd-EmOQ")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # دیکشنری موقت برای ذخیره شماره‌ها (برای سادگی)
 # در نسخه نهایی می‌توانید از دیتابیس استفاده کنید
